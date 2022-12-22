@@ -1,0 +1,565 @@
+---
+title: "COVID"
+output: html_document
+date: '2022-05-26'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+packages <- function(x) {
+  for (i in x) {
+    if (!require(i, character.only = TRUE)) {
+      install.packages(i, dependencies = TRUE)
+      library(i, character.only = TRUE)
+    }
+  }
+}
+packages(c("haven", "readxl", "readr", "tidyverse" , "data.table" , "naniar", "rockchalk", "lubridate", "kableExtra", "DT", "formatR", 
+           "zoo", "binom", "plotly", "janitor", "sjlabelled", "Hmisc", "rms", "aod", "sandwich", "lmtest", "tableone", "broom", "pooling", "tidymodels", "glmnet", "caret", "class", "investr", "creditmodel", "ggbeeswarm", "furniture"))
+```
+
+# **Data**
+
+```{r}
+setwd("C:/Users/henderh/Desktop/Projects/covid analysis/Covid_Rproj")
+full_data_long <- read_csv("full2_data_long_1212.csv")
+covid_comorb <- read_excel("comorb_crosswalk.xlsx")
+```
+
+```{r}
+full <- full_data_long
+glimpse(full)
+```
+
+#### **Create variables**
+
+```{r}
+full1 <- full %>%
+  mutate(pat_mrn_id = as.character(pat_mrn_id),
+         age_at_dx = floor(age_at_dx),
+         # age_grp = case_when(age_at_dx < 50 ~ "18-49",
+         #                     age_at_dx %in% c(50:59) ~ "50-59",
+         #                     age_at_dx %in% c(60:69) ~ "60-69",
+         #                     age_at_dx %in% c(70:79) ~ "70-79",
+         #                     age_at_dx >= 80 ~ "80plus"),
+         age_grp = case_when(age_at_dx < 50 ~ "18_49",
+                             age_at_dx %in% c(50:74) ~ "50_74",
+                             age_at_dx >= 75 ~ "75plus"),
+         age_grp = factor(age_grp, labels = c("18-49", "50-74", "\u226575")),
+         vax2 = ifelse(vax_doses >= 2, 1, 0),
+         vax_doses = factor(vax_doses),
+         race_eth = case_when(ethnicity == "hispanic" ~ "hispanic",
+                              is.na(race) | race == "unknown" ~ "unknown",
+                              race %in% c("asian", "black", "na/pi", "white") ~ race),
+         race_eth = factor(race_eth, levels = c("white", "black", "asian", "na/pi", "hispanic", "unknown")),
+         race_eth2 = ifelse(race_eth %in% c("asian", "na/pi", "unknown"), "other/unknown", as.character(race_eth)),
+         race_eth2 = factor(race_eth2, levels = c("white", "black", "hispanic", "other/unknown")),
+         hosp_los = as.numeric(disch_date - admit_date),
+         hosp_los = ifelse((is.na(hosp_los) | hosp_covid == 0), 0, hosp_los)) %>%
+         #variant = ifelse(test_date < as.Date("2021-12-15"), "delta", "omicron")) %>%
+  select(-c(race, ethnicity))
+glimpse(full1)
+n_distinct(full1$pat_mrn_id)
+# 54,886 / 60,386 patients
+```
+
+```{r}
+comorbs <- covid_comorb %>%
+  select(-dx_name)
+full2 <- full1 %>%
+  left_join(comorbs) %>%
+  mutate(condition = ifelse(is.na(condition), "none", condition),
+         last_vax = case_when(days_vax_to_test %in% c(0:90) ~ "<=90 days",
+                              days_vax_to_test %in% c(91:180) ~ "91-180 days",
+                              days_vax_to_test %in% c(181:270) ~ "181-270 days",
+                              days_vax_to_test > 270 ~ ">270 days"),
+         last_vax = factor(last_vax, levels = c("<=90 days", "91-180 days", "181-270 days", ">270 days"))) %>%
+  select(pat_mrn_id, gender, age_at_dx, age_grp, race_eth, race_eth2, vax_doses, vax2, days_vax_to_test, last_vax, test_date, condition, outpatient_med, hosp_covid, hosp_los, med_start, admit_date, primary_clinical_dx) %>%
+  distinct()
+# Find and remove duplicates
+a <- full2 %>%
+  select(pat_mrn_id, test_date, outpatient_med, med_start, admit_date, primary_clinical_dx) %>%
+  distinct() %>%
+  add_count(pat_mrn_id) %>%
+  filter(n > 1) %>%
+  group_by(pat_mrn_id) %>%
+  fill(admit_date, .direction = "downup") %>%
+  fill(med_start, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(outpatient_med = ifelse(med_start >= admit_date & !is.na(admit_date), "none", outpatient_med)) %>%
+  distinct() %>%
+  add_count(pat_mrn_id) %>%
+  filter(nn > 1) %>%
+  filter((pat_mrn_id %in% c("100002404992", "100076364767") & outpatient_med != "none") | outpatient_med == "none")
+full3 <- full2 %>%
+  anti_join(a) %>%
+  mutate(any_med = ifelse(outpatient_med == "none", 0, 1),
+         hosp_covid = ifelse(pat_mrn_id %in% c("100002404992", "100076364767"), 0, hosp_covid)) %>%
+  select(-c(med_start, admit_date, primary_clinical_dx)) %>%
+  mutate(condition = ifelse(condition %in% c("alpha 1 antitrypsin deficiency", "thalassemia", "obesity", "tuberculosis", "hypertension", "anxiety"), "none", condition)) %>%
+  distinct()
+n_distinct(full3$pat_mrn_id)
+```
+
+### **Descriptive statistics**
+
+```{r descriptive stats}
+df = full3 %>% 
+  select(pat_mrn_id, gender, vax_doses, days_vax_to_test, vax2, hosp_covid, race_eth, age_at_dx, age_grp, hosp_los, any_med) %>% 
+  distinct()
+df2 <- df %>%
+  add_count(pat_mrn_id) %>%
+  filter(n == 1 | n > 1 & hosp_covid == 1)
+n_distinct(df2$pat_mrn_id)
+vars <- c("age_at_dx", "age_grp", "gender", "race_eth", "days_vax_to_test", "vax2", "hosp_covid", "hosp_los", "any_med")
+factorVars <- c("age_grp", "gender", "race_eth", "vax2", "hosp_covid", "any_med")
+tableOne <- CreateTableOne(vars = vars, data = df2, strata = c("any_med", "vax2"), factorVars = factorVars)
+tbl <- (print(tableOne, nonnormal = TRUE, quote = FALSE, noSpaces = TRUE, printToggle = FALSE, test = FALSE))
+tbl
+```
+
+```{r}
+df2 %>%
+  mutate(hosp_covid = factor(hosp_covid)) %>%
+  group_by(any_med, vax2) %>%
+  table1(hosp_covid, age_grp, gender, race_eth, row_wise = TRUE, format_number = TRUE, na.rm = FALSE)
+```
+
+#### **Wide dataset**
+
+```{r}
+full_wide_hosp <- full3 %>%
+  select(-c(hosp_los, test_date, race_eth, days_vax_to_test, last_vax, outpatient_med)) %>%
+  distinct() %>%
+  mutate(a = 1, b = 1, c = 1) %>%
+  pivot_wider(names_from = condition, values_from = a, names_prefix = "cond_", values_fill = 0) %>%
+  pivot_wider(names_from = gender, values_from = b, names_prefix = "gend_", values_fill = 0) %>%
+  pivot_wider(names_from = race_eth2, values_from = c, names_prefix = "race_eth_", values_fill = 0) %>%
+  # pivot_wider(names_from = outpatient_med, values_from = d, names_prefix = "med_", values_fill = 0) %>%
+  # pivot_wider(names_from = vax_doses, values_from = e, names_prefix = "vax_doses_", values_fill = 0) %>%
+  # pivot_wider(names_from = variant, values_from = f, names_prefix = "variant_", values_fill = 0) %>%
+  clean_names() %>%
+  rename(cond_copd_bronchiectasis = cond_chronic_obstructive_pulmonary_disease_and_bronchiectasis,
+         cond_pulm_hypertension_embolism = cond_pulmonary_hypertension_and_pulmonary_embolism) %>%
+  add_count(pat_mrn_id) %>%
+  filter(n == 1 | n > 1 & hosp_covid == 1) %>%
+  select(-c(cond_none, gend_female, gend_na, race_eth_white, race_eth_other_unknown, n))
+glimpse(full_wide_hosp)
+# write.csv(full_wide_hosp, "full2_wide_hosp_1212.csv", row.names = FALSE)
+```
+
+#### **Stratified by age and vaccination status**
+
+```{r}
+names(full2)
+age_vax <- full2 %>%
+  select(pat_mrn_id, hosp_covid, age_grp, outpatient_med, vax2, days_vax_to_test) %>%
+  distinct()
+age_vax %>%
+  filter(hosp_covid == 1) %>%
+  tabyl(age_grp, vax2) %>% 
+  adorn_totals("row") %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting() %>%
+  adorn_ns() %>%
+  adorn_title()
+```
+
+```{r}
+full_wide_hosp %>%
+  filter(age_grp == "18_49") %>%
+  tabyl(vax2, hosp_covid) %>% 
+  adorn_totals("row") %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting() %>%
+  adorn_ns() %>%
+  adorn_title()
+full_wide_hosp %>%
+  filter(age_grp == "50_74") %>%
+  tabyl(vax2, hosp_covid) %>% 
+  adorn_totals("row") %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting() %>%
+  adorn_ns() %>%
+  adorn_title()
+full_wide_hosp %>%
+  filter(age_grp == "75plus") %>%
+  tabyl(vax2, hosp_covid) %>% 
+  adorn_totals("row") %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting() %>%
+  adorn_ns() %>%
+  adorn_title()
+```
+
+#### **Data for tables**
+
+```{r}
+names(full3)
+names(full_wide_hosp)
+df_analysis <- full_wide_hosp %>% select(-pat_mrn_id)
+df_analysis <- full3 %>%
+  select(pat_mrn_id, gender, age_at_dx, age_grp, race_eth2, vax_doses, last_vax, hosp_covid, any_med, condition) %>%
+  distinct()
+
+f3 <- function(fmla) {
+  model <- glm(fmla, data = df_analysis, family = poisson(link = "log"))
+  d <- exp(coeftest(model, vcov = sandwich))
+  e <- cbind(d[,1], exp(confint(model)))
+}
+
+# model <- glm(fmla, data = a, family = poisson(link = "log"))
+# summary(model)
+
+fmla <- hosp_covid ~ .
+mod_rr <- f3(fmla)
+as.data.frame(mod_rr) %>%
+  rownames_to_column("feature") %>%
+  mutate_if(is.numeric, round, 4) %>%
+  rename(RR = V1)
+
+fmla <- hosp_covid ~ rcs(age_at_dx,3) + condition
+mod_rr <- f3(fmla)
+as.data.frame(mod_rr) %>%
+  rownames_to_column("feature") %>%
+  mutate_if(is.numeric, round, 2) %>%
+  rename(RR = V1)
+```
+
+```{r}
+names(full_wide_hosp)
+df_analysis <- full_wide_hosp
+df_analysis <- full3 %>% 
+  select(pat_mrn_id, age_grp, gender, race_eth, hosp_covid, vax2, any_med) %>%
+  distinct() %>%
+  add_count(pat_mrn_id) %>%
+  filter(n > 1 & hosp_covid == 1 | n == 1) %>%
+  mutate(hosp_covid = factor(hosp_covid),
+         vax2 = factor(vax2),
+         any_med = factor(any_med))
+df_analysis %>%
+  tabyl(hosp_covid, any_med, vax2) %>%
+  adorn_totals(c("row", "col")) %>% 
+  adorn_percentages("all") %>% 
+  adorn_pct_formatting() %>% 
+  adorn_ns() %>%
+  adorn_title()
+```
+
+#### **Plots**
+
+```{r}
+df_plt <- full3 %>% 
+  select(pat_mrn_id, age_at_dx, age_grp, gender, race_eth2, hosp_covid, vax2, any_med, days_vax_to_test) %>% 
+  distinct() %>% 
+  add_count(pat_mrn_id) %>% 
+  filter(n == 1 | (n > 1 & hosp_covid == 1)) %>%
+  select(-n) %>%
+  mutate(hosp_covid = as.logical(hosp_covid),
+         vax2 = as.logical(vax2),
+         any_med = as.logical(any_med))
+df_plt$race_eth2 <- factor(df_plt$race_eth2, levels = c("black", "hispanic", "white", "other/unknown"), labels = c("Black", "Hispanic", "White", "Other/Unknown"))
+```
+
+```{r}
+# Hospitalization by age and race/ethnicity
+mod <- lm(hosp_covid ~ rcs(age_at_dx, 3) * race_eth2, data = df_plt %>% filter(race_eth2 != "Other/Unknown"))
+plt_race <- as.data.frame(predFit(mod, newdata = df_plt %>% filter(race_eth2 != "Other/Unknown"), se.fit = TRUE, interval = "confidence", adjust = "Scheffe"))
+plt_race <- plt_race %>% cbind(df_plt %>% filter(race_eth2 != "Other/Unknown"))
+plt <- ggplot(data = plt_race) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = race_eth2)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = race_eth2), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkgreen", "darkred"),
+                     name = "") +
+  scale_fill_manual(name = "",
+                      values = c("darkblue", "darkgreen", "darkred")) +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .2, .1), limits = c(0, .25))
+plt
+# ggsave(filename = "race_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+```{r}
+# Hospitalization by age and vax/treatment
+mod <- glm(hosp_covid ~ poly(age_at_dx, 2) * vax2 + any_med, data = df_plt, family = poisson(link = "log"))
+summary(mod)
+a <- as.data.frame(predict(mod, newdata = df_plt, se.fit = TRUE))
+medvax_plt <- a %>%
+  cbind(df_plt) %>%
+  mutate(fit2 = exp(fit),
+         fit.lwr = exp(fit - 2 * se.fit),
+         fit.upr = exp(fit + 2 * se.fit),
+         medvax_grp = case_when(!any_med & !vax2 ~ "med0vax0",
+                                !any_med & vax2 ~ "med0vax1",
+                                any_med & !vax2 ~ "med1vax0",
+                                any_med & vax2 ~ "med1vax1"))
+
+plt <- ggplot(data = medvax_plt) +
+  geom_line(aes(x = age_at_dx, y = fit2, colour = medvax_grp)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = medvax_grp), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkgreen", "darkred", "purple"),
+                     name = "") +
+  scale_fill_manual(name = "",
+                      values = c("darkblue", "darkgreen", "darkred", "purple")) +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .4, .1), limits = c(0, .45))
+plt
+# ggsave(filename = "race_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+
+```{r}
+# Hospitalization by age and vaccination status
+mod <- lm(hosp_covid ~ rcs(age_at_dx, 5) * vax2, data = df_plt)
+plt_vax <- as.data.frame(predFit(mod, newdata = df_plt, se.fit = TRUE, interval = "confidence", adjust = "Scheffe"))
+plt_vax <- plt_vax %>% cbind(df_plt)
+plt <- ggplot(data = plt_vax) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = vax2)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = vax2), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkred"),
+                    labels = c("Unvaccinated", "Vaccinated"),
+                     name = "") +
+  scale_fill_manual(values = c("darkblue", "darkred"),
+                    labels = c("Unvaccinated", "Vaccinated"),
+                    name = "") +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .2, .1), limits = c(0, .25))
+plt
+# ggsave(filename = "vax_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+```{r}
+# Hospitalization by age and sex
+mod <- lm(hosp_covid ~ rcs(age_at_dx, 5) * gender, data = df_plt)
+plt_gend <- as.data.frame(predFit(mod, newdata = df_plt %>% filter(!is.na(gender)), se.fit = TRUE, interval = "confidence", adjust = "Scheffe"))
+plt_gend <- plt_gend %>% cbind(df_plt %>% filter(!is.na(gender)))
+plt <- ggplot(data = plt_gend) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = gender)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = gender), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkred"),
+                    labels = c("Female", "Male"),
+                     name = "") +
+  scale_fill_manual(values = c("darkblue", "darkred"),
+                    labels = c("Female", "Male"),
+                    name = "") +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .2, .1), limits = c(0, .25))
+plt
+# ggsave(filename = "gend_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+```{r}
+# Hospitalization by age and time since vaccination
+mod <- lm(hosp_covid ~ rcs(days_vax_to_test, 3) * age_grp, data = df_plt)
+plt_timevax <- as.data.frame(predFit(mod, newdata = df_plt %>% filter(!is.na(days_vax_to_test)), se.fit = TRUE, interval = "confidence", adjust = "Scheffe"))
+plt_timevax <- plt_timevax %>% 
+  cbind(df_plt %>% filter(!is.na(days_vax_to_test))) %>%
+  mutate(fit.fit = ifelse(fit.fit < 0, 0, fit.fit),
+         fit.lwr = ifelse(fit.lwr < 0, 0, fit.lwr))
+plt <- ggplot(data = plt_timevax) +
+  geom_line(aes(x = days_vax_to_test, y = fit.fit, colour = age_grp)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = days_vax_to_test, fill = age_grp), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(name = "",
+                     values = c("darkblue", "darkgreen", "darkred")) +
+  scale_fill_manual(name = "",
+                    values = c("darkblue", "darkgreen", "darkred")) +
+  scale_x_continuous("Time since last vaccine dose (days)", breaks = seq(0, 365, 90), limits = c(0,365)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .2, .1), limits = c(0, .25))
+plt
+# ggsave(filename = "time_vax_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+```{r}
+# Hospitalization by sex and vaccination
+b <- full2 %>%
+  group_by(hosp, gender, vax2) %>%
+  summarise(n = n()) %>%
+  group_by(gender, vax2) %>%
+  mutate(pct = round(n/sum(n) * 100, 1)) %>%
+  filter(hosp == 1, !is.na(gender)) %>%
+  ungroup
+
+ggplot(data = b, aes(x = vax2)) + geom_bar(aes(y = pct, fill = gender), stat = "identity", position = "dodge") + 
+  theme(panel.border = element_blank(),  
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  axis.line = element_line(colour = "grey"),
+  text = element_text(size = 12), 
+  legend.key = element_blank()) +
+  xlab("Vaccination") + 
+  ylab("Percent hospitalized") + 
+  scale_y_continuous(limits = c(0,8), breaks = c(0, 2, 4, 6, 8)) + 
+  scale_fill_manual(name = "", values = c("darkslategray4", "burlywood3"))
+```
+
+```{r}
+# features <- read_excel("C:/Users/henderh/Desktop/Projects/covid analysis/manuscript/features.xlsx")
+feat1 <- features %>%
+  filter(vaccination == "yes") %>%
+  mutate(age_grp = factor(age_grp, labels = c("18-49", "50-74", ">=75")))
+plt <- ggplot(feat1, aes(fill=age_grp, y=value, x=feature)) + 
+  geom_bar(position = position_dodge2(preserve = "single"), stat = "identity", width = .5) +
+  scale_x_discrete(limits = rev(unique(sort(feat1$feature))), name = "Feature") +
+  scale_y_continuous(limits = c(0, 1), name = "Contribution to prediction") +
+  coord_flip() +
+  theme(panel.border = element_blank(),  
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.title = element_blank(),
+  legend.position = c(.88, .88),
+  axis.line = element_line(colour = "grey")) +
+  scale_fill_brewer(palette="Dark2")
+plt
+# ggsave(filename = "feature_imp_all.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+# ggsave(filename = "feature_imp_vax.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+```{r}
+plot_df <- read_excel("C:/Users/henderh/Desktop/Projects/covid analysis/manuscript/features.xlsx", sheet = "forestplot_data")
+names <- c("Omicron variant", "Casirivimab/imdevimab", "Nirmatrelvir/ritonavir", "Vaccine doses: 1", "Vaccine doses: 2", "Vaccine doses: 3")
+df <- plot_df %>%
+  mutate(var = factor(feature, levels = c("omicron", "casirivimab_imdevimab", "paxlovid", "vax_doses_1", "vax_doses_2", "vax_doses_3"), labels = names))
+
+chart <- ggplot(data = df, aes(x = var, y = estimate, ymin = lower, ymax = upper)) +
+  geom_point(position = position_dodge(width = 0.4), colour = "midnightblue") +
+  geom_errorbar(width = .1, colour = "midnightblue") +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  axis.line.x = element_line(colour = "lightgrey"),
+  axis.line.y = element_blank(),
+  text = element_text(size = 14)) +
+  scale_y_continuous("", trans = "log10", labels = prettyNum, limits = c(.001, 10)) +
+  scale_x_discrete("", limits = rev) + 
+  coord_flip() +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "midnightblue")
+chart
+# ggsave(filename = "adj_rrs.tiff", plot = chart, device="tiff", dpi=600, width = 6, height = 3)
+```
+
+```{r}
+shap <- read.csv("shap_vals_1207.csv")
+df <- read.csv("C:/Users/henderh/Desktop/Projects/covid analysis/data files/full_wide_hosp_1207.csv")
+levels <- c("variant_omicron", "med_casirivimab_imdevimab", "med_paxlovid", "vax_doses_1", "vax_doses_2", "vax_doses_3",  "age_at_dx", "gend_male", "cond_chronic_kidney_disease", "race_eth_hispanic")
+labels <- c("Omicron variant", "Casirivimab/imdevimab", "Nirmatrelvir/ritonavir",  "Vaccine doses: 1", "Vaccine doses: 2", "Vaccine doses: 3", "Age in years", "Gender: Male", "Chronic kidney disease", "Ethnicity: Hispanic")
+shap1 <- shap %>% 
+  select(all_of(levels)) %>% 
+  mutate(id = row_number())
+df1 <- df %>% 
+  select(all_of(levels)) %>% 
+  mutate(id = row_number(),
+         age_at_dx = min_max_norm (age_at_dx))
+a <- shap1 %>%
+  #slice(c(0:1000)) %>%
+  pivot_longer(cols = all_of(levels), names_to = "var", values_to = "shap_val")
+b <- df1 %>%
+  #slice(c(0:1000)) %>%
+  pivot_longer(cols = all_of(levels), names_to = "var", values_to = "data_val")
+c <- a %>% left_join(b) %>% mutate(var = factor(var, levels = levels, labels = labels))
+c$var <- fct_rev(c$var)
+
+chart <- ggplot(c, aes(x = var, y = shap_val, colour = data_val)) +
+  geom_quasirandom(cex = 1, groupOnX = TRUE) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  axis.line.x = element_line(colour = "lightgrey"),
+  axis.line.y = element_blank(),
+  legend.key.width = unit(.2, "cm"),
+  legend.key.height = unit(1.6, "cm"),
+  text = element_text(size = 14)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "midnightblue") +
+  scale_y_continuous("", limits = c(-4, 3)) +
+  xlab("") +
+  scale_colour_gradient("", low = "lightgrey", high = "midnightblue", breaks = c(0,1), labels = c("Low", "High")) +
+  coord_flip()
+# ggsave(filename = "shap_plot_beeswarm.tiff", plot = chart, device="tiff", dpi=600, width = 7, height = 4)
+```
+
+```{r}
+# chart <- ggplot(c, aes(shap_val, var, colour = data_val)) +
+#   geom_point(cex = 1, position = position_jitterdodge(jitter.width = .2, jitter.height = 0, seed = 5)) +
+#   theme(panel.border = element_blank(),
+#   panel.grid.major = element_blank(),
+#   panel.grid.minor = element_blank(),
+#   panel.background = element_blank(),
+#   axis.ticks = element_blank(),
+#   axis.line.x = element_line(colour = "lightgrey"),
+#   axis.line.y = element_blank(),
+#   legend.key.width = unit(.2, "cm"),
+#   legend.key.height = unit(1.6, "cm"),
+#   text = element_text(size = 14)) +
+#   geom_vline(xintercept = 0, linetype = "dashed", colour = "midnightblue") +
+#   scale_x_continuous("", limits = c(-4, 3)) +
+#   ylab("") +
+#   scale_colour_gradient("", low = "lightgrey", high = "midnightblue", breaks = c(0,1), labels = c("Low", "High"))
+# ggsave(filename = "shap_plot.tiff", plot = chart, device="tiff", dpi=600, width = 7, height = 4)
+```
+
+
+
+
+
+
+
+
+
