@@ -1,0 +1,555 @@
+---
+title: "CIVETS2"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    code_folding: show
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE, error = FALSE, eval = TRUE, tidy = TRUE, cache = FALSE)
+```
+
+```{r libraries}
+packages <- function(x){
+  for(i in x){
+     if(!require(i, character.only = TRUE)){
+      install.packages(i, dependencies = TRUE)
+       library(i, character.only = TRUE)
+    }
+  }
+}
+packages(c("readxl", "readr", "tidyverse" , "data.table" , "naniar", "rockchalk", "lubridate", "kableExtra", "DT", "formatR", "zoo", "binom", "plotly", "janitor", "sjlabelled", "Hmisc", "rms", "aod", "sandwich", "lmtest", "tableone", "broom", "pooling", "gee", "pglm", "tidymodels", "vroom", "sqldf"))
+```
+
+# **Raw data files**
+
+```{r raw data files}
+options(scipen=999)
+setwd("D:/project/Heather/Rproj_CIVETS")
+
+labs <- fread("grep CULTURE D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_ALL_ENCOUNTER_LABS.csv")
+cohort_entry <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_COHORT_ENTRY.csv")
+covid_tests <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_COVID_TESTS.csv")
+encounter_dx <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_ENCOUNTER_DIAGNOSIS.csv")
+encounters <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_ENCOUNTERS.csv")
+flowsheets <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_FLOWSHEETS.csv")
+immunizations <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_IMMUNIZATIONS.csv")
+medications_all <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_NAPRAVNIK_MEDICATIONS.csv")
+pathology <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_PATHOLOGY.csv")
+demographics <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_PATIENT_DEMOGRAPHICS.csv")
+problem_list <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_PATIENT_PROBLEM_LIST.csv")
+procedures <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_PROCEDURES.csv")
+rdc_notes <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_RDC_NOTES.csv")
+social_hx <- fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_SOCIAL_HISTORY.csv")
+
+medications_covid <- fread("covid_meds_0822.csv")
+deaths <- fread("deaths_new.csv")
+```
+
+# **Data cleaning**
+#### Demographics
+
+```{r}
+demo <- read_rds("demo.rds")
+# demo <- demographics %>%
+#   clean_names() %>%
+#   mutate_all(tolower) %>%
+#   mutate(birth_date = as.Date(birth_date),
+#          death_date = as.Date(death_date),
+#          race = case_when(patient_race_1 %in% c("other race", "prefer not to answer", "unknown") ~ patient_race_2,
+#                           TRUE ~ patient_race_1),
+#          race = case_when(race %in% c("american indian or alaska native", "native hawaiian or other pacific islander") ~ "na/pi", 
+#                           race %in% c("other race", "prefer not to answer", "unknown", "") ~ "unknown",
+#                           race == "black or african american" ~ "black",
+#                           race == "white or caucasian" ~ "white",
+#                           TRUE ~ race),
+#          ethnicity = case_when(ethnicity == "hispanic or latino" ~ "hispanic",
+#                                ethnicity == "not hispanic or latino" ~ "nonhispanic",
+#                                TRUE ~ "unknown")) %>%
+#   select(pat_mrn_id, gender, birth_date, ethnicity, race, death_date, patient_status, address_line_1, city, state, zip)
+# write_rds(demo, "demo.rds")
+# 262,584 patients
+```
+
+#### Covid tests
+
+```{r}
+tests_all3 <- read_rds("tests_all3.rds")
+# tests_all <- covid_tests %>%
+#   clean_names() %>%
+#   mutate_all(tolower) %>%
+#   inner_join(demo %>% select(pat_mrn_id, birth_date)) %>%
+#   mutate(test_date = as.Date(specimen_taken_time),
+#          result_date = as.Date(result_time),
+#          test_date = as.Date(ifelse(is.na(test_date), result_date, test_date)), # Set missing test dates to result date
+#          component_name = str_trim(component_name),
+#          ordered_test_description = str_trim(ordered_test_description)) %>%
+#   filter(ord_value %in% c("detected", "positive", "reactive"))
+# 
+# tests_all2 <- tests_all %>%
+#   select(pat_mrn_id, birth_date, test_date, result_date, component_name) %>%
+#   distinct() %>%
+#   add_count(pat_mrn_id) %>%
+#   filter(n == 1 | str_detect(component_name, pattern =  c("pcr|naa|send"))) %>% # Select PCR tests
+#   select(-n) %>%
+#   mutate(test_type = ifelse(str_detect(component_name, pattern =  c("pcr|naa|send")), "pcr", "antigen"))
+# tests_all3 <- tests_all2 %>%
+#   select(-component_name) %>%
+#   distinct() %>%
+#   filter(test_type == "pcr")
+# # write_rds(tests_all3, "tests_all3.rds")
+# n_distinct(tests_all3$pat_mrn_id)
+# 185,793 PCR results in 169,222 patients
+# 202,666 total positive results in 179,975 patients
+```
+
+#### Covid vaccinations
+
+```{r}
+vax_brkthr <- read_rds("vax_brkthr.rds")
+# vax <- immunizations %>%
+#   clean_names() %>%
+#   select(pat_mrn_id, vaccine_name, vx_admin_date) %>%
+#   mutate_all(tolower) %>%
+#   mutate(vx_admin_date = as.Date(vx_admin_date),
+#          vax_name = str_extract(vaccine_name, "pfizer|moderna|janssen|astrazeneca|sinovac|unspecified"),
+#          vax_type = case_when(vax_name %in% c("pfizer", "moderna") ~ "rna",
+#                               vax_name %in% c("janssen", "astrazeneca") ~ "recombinant",
+#                               vax_name == "sinovac" ~ "inactivated",
+#                               vax_name == "unspecified" ~ "unspecified")) %>%
+#   filter(vx_admin_date >= "2020-12-01", vx_admin_date < today())
+# vax_brkthr <- vax %>%
+#   inner_join(tests_all3) %>%
+#   mutate(vax_effect_date = vx_admin_date + 14,
+#          days_vax_to_test = as.numeric(test_date - vax_effect_date)) %>%
+#   group_by(pat_mrn_id) %>%
+#   mutate(t_dose = vax_effect_date - dplyr::lag(vax_effect_date)) %>% # Get time between doses
+#   ungroup %>%
+#   filter(t_dose >= 14 | is.na(t_dose), # Select doses >=14 days since last or first dose
+#          days_vax_to_test >= 0) %>% # Select vaccines received prior to positive test
+#   group_by(pat_mrn_id) %>%
+#   mutate(dose_num = row_number()) %>%
+#   slice(which.max(dose_num)) %>% # Select last dose prior to positive test
+#   ungroup %>%
+#   mutate(dose_num = ifelse(dose_num > 3, 3, dose_num)) %>%
+#   select(pat_mrn_id, test_date, result_date, vax_type, vx_admin_date, vax_effect_date, t_dose, dose_num, days_vax_to_test)
+# write_rds(vax, "vax.rds")
+# write_rds(vax_brkthr, "vax_brkthr.rds")
+# 58,704 positive tests in vaccinated patients
+```
+
+#### Hospitalizations
+
+```{r}
+# All encounters
+encounters_clean <- read_rds("encounters_clean.rds")
+# encounters_clean <- encounters %>%
+#   clean_names() %>%
+#   mutate_all(tolower) %>%
+#   unique() %>%
+#   mutate(hosp_admsn_time = parse_date_time(hosp_admsn_time, orders = "Ymd HMS"),
+#          hosp_disch_time = parse_date_time(hosp_disch_time, orders = "Ymd HMS"),
+#          hours_admitted = round(as.numeric(hosp_disch_time - hosp_admsn_time, units = "hours")),
+#          admit_date = as.Date(hosp_admsn_time, tz = ""),
+#          disch_date = as.Date(hosp_disch_time, tz = "")) %>%
+#   select(-c(run_date, pat_id, inpatient_data_id, reason_visit_name, follow_up_visit_topic, means_of_arrival, deceased_yn, is_p_yn, hsp_account_id, hosp_admsn_time, hosp_disch_time, discharge_destination, visit_provider_title, visit_provider_name, attending_title, attending_provider, admitting_provider_title, admitting_provider_name, admitting_provider_name, discharge_provider_name, discharge_provider_title, payor_name, financial_class, checkin_time, checkout_time, inpatient_admit_time))
+# n_distinct(encounters_clean$pat_mrn_id)
+# Encounters for 227,961 patients
+# write_rds(encounters_clean, "encounters_clean.rds")
+# Encounters within study period for patients with positive PCR test
+encounters_all <- encounters_clean %>%
+  inner_join(tests_all3 %>% select(-birth_date)) %>%
+  left_join(demo %>% select(pat_mrn_id, birth_date)) %>%
+  select(pat_mrn_id, pat_enc_csn_id, location, department_name, primary_clinical_dx, hours_admitted, admit_date, disch_date, test_date, result_date, birth_date)
+n_distinct(encounters_all$pat_mrn_id)
+# 169,217 patients
+
+# Admissions >24 hours and within 30 days of test date
+hosp_all <- encounters_all %>%
+  filter(hours_admitted >= 24,
+         admit_date >= test_date & admit_date <= test_date + 30)
+
+# Admissions with covid-19 primary dx
+hosp_covid <- hosp_all %>%
+  filter(str_detect(primary_clinical_dx, "19|covid|coronav|sars"),
+         !str_detect(primary_clinical_dx, "burn|preterm|preg|tumor|parvo|vaccination|screening|ruled out|exposure"))
+n_distinct(hosp_covid$pat_mrn_id)
+# 8,131 admissions in 7,656 patients
+
+dx_covid <- hosp_covid %>%
+  select(pat_mrn_id, primary_clinical_dx) %>%
+  distinct() %>%
+  tabyl(primary_clinical_dx)
+```
+
+```{r}
+# List of alternate diagnoses
+# a <- hosp_all %>%
+#   inner_join(tests_all3) %>%
+#   filter(!str_detect(primary_clinical_dx, "19|covid|coronav|sars|aspiration|influen|rsv|hospital|acidosis|bacter|cavitary|newborn|abscess"),
+#          !str_detect(primary_clinical_dx, "burn|preterm|preg|tumor|parvo|vaccination|screening|ruled out|exposure|health|history"),
+#          str_detect(primary_clinical_dx, "hypox|respir|shortness|pneumon|viral"))
+# b <- a %>%
+#   select(pat_mrn_id, primary_clinical_dx) %>%
+#   distinct() %>%
+#   tabyl(primary_clinical_dx)
+```
+
+```{r}
+# # Admissions with non-covid-19 primary dx with positive test
+# hosp_noncovid <- hosp %>%
+#   filter(!str_detect(primary_clinical_dx, "19|covid|coronav|sars"),
+#          days_test_to_admit %in% c(-7:14) & disch_date - test_date > 0) %>%
+#   mutate(patient_cat = "hosp_noncovid",
+#          test_type = "pcr")
+# dx_other <- hosp_noncovid %>%
+#   filter(primary_clinical_dx != "") %>%
+#   select(pat_mrn_id, primary_clinical_dx) %>%
+#   distinct() %>%
+#   tabyl(primary_clinical_dx) %>%
+#   filter(n >= 15)
+# # Encounters <24 hours within 14 days of positive test
+# ed_visit <- encounters_all %>%
+#   filter(days_test_to_admit %in% c(0:14)) %>%
+#   anti_join(hosp %>% select(pat_enc_csn_id)) %>%
+#   mutate(patient_cat = "emerg_dept",
+#          test_type = "pcr")
+```
+
+```{r}
+# Add admissions to test data
+data1 <- tests_all3 %>%
+  left_join(hosp_covid %>% mutate(covid_hosp = TRUE)) %>%
+  left_join(encounters_all %>% select(pat_mrn_id, pat_enc_csn_id, test_date, result_date, admit_date, disch_date, primary_clinical_dx)) %>%
+  select(-c(location, department_name)) %>%
+  distinct() %>%
+  mutate(dx_date = result_date,
+         covid_hosp = ifelse(is.na(covid_hosp), FALSE, covid_hosp))
+
+data2 <- data1 %>%
+  select(pat_mrn_id, covid_hosp) %>%
+  distinct() %>%
+  add_count(pat_mrn_id) %>%
+  filter(n > 1 & covid_hosp | n == 1) %>% # Select covid_hosp TRUE where both TRUE and FALSE observations for patient
+  inner_join(data1) %>%
+  select(-c(n, test_date, result_date)) %>%
+  distinct()
+
+n_distinct(data2$pat_mrn_id)
+glimpse(data2)
+# 169,222 patients
+```
+
+#### **Covid medications**
+
+```{r}
+meds_outpat_all <- read_rds("meds_outpat_all.rds")
+# meds <- medications %>%
+#   clean_names() %>%
+#   mutate_all(list(tolower)) %>%
+#   mutate(med_start = dmy(startdate),
+#          med_stop = dmy(stopdate),
+#          medication = ifelse(medication == "remdesivir - study", "remdesivir", medication)) %>%
+#   select(-c(mar_action, name, dose, dose_unit, startdate, stopdate)) %>%
+#   inner_join(data2 %>% select(pat_mrn_id, dx_date)) %>%
+#   filter(!medication %in% c("baricitinib", "casirivimab", "bamlanivimab", "tocilizumab")) %>%
+#   distinct()
+# 
+# # Function to identify outpatient meds, run parts separately for remdesivir
+# f1 <- function(med_name) {
+# # Filter medication and first med start date per encounter, change med_name for remdesivir
+#   med_single <- meds %>%
+#     filter(medication == med_name) %>%
+#     select(-c(dx_date, med_stop)) %>%
+#     distinct() %>%
+#     group_by(pat_enc_csn_id) %>%
+#     slice_min(med_start) %>%
+#     ungroup()
+# # Join medication to encounter by encounter id
+#   med_enc_all <- med_single %>% 
+#     inner_join(encounters_all %>% select(pat_enc_csn_id, primary_clinical_dx, hours_admitted, admit_date, disch_date)) %>%
+#     distinct()
+# # Dataset of patients with hospital admission for remdesivir exclusion
+#   med_enc_hosp <- med_enc_all %>% 
+#     filter(hours_admitted >= 24)
+# # Dataset of ed patients
+#   med_enc_ed <- med_enc_all %>% 
+#     filter(hours_admitted < 24) %>%
+#            #!pat_mrn_id %in% med_enc_hosp$pat_mrn_id) %>% # Exclusion for remdesivir only
+#     select(pat_mrn_id, medication, med_start) %>%
+#     distinct()
+# # Dataset of patients with no encounter
+#   med_enc_none <- med_single %>% 
+#     select(pat_mrn_id, medication, med_start) %>%
+#     filter(!pat_mrn_id %in% med_enc_all$pat_mrn_id) %>%
+#     group_by(pat_mrn_id) %>%
+#     slice_min(med_start) %>%
+#     ungroup() %>%
+#     distinct()
+# # Dataset of patients with non-hospital encounter  
+#   med_enc_other <- med_enc_all %>%
+#     filter(!pat_mrn_id %in% med_enc_none$pat_mrn_id,
+#            !pat_mrn_id %in% med_enc_ed$pat_mrn_id,
+#            !pat_mrn_id %in% med_enc_hosp$pat_mrn_id) %>%
+#     select(pat_mrn_id, medication, med_start) %>%
+#     distinct()
+# # Dataset of patients with outpatient med = ed only or no encounter
+#   med_outpat <- med_enc_none %>%
+#     rbind(med_enc_ed) %>%
+#     rbind(med_enc_other) %>% # Exclude for remdesivir
+#     select(pat_mrn_id, medication, med_start) %>%
+#     distinct()
+# # Find patients who had covid hospitalization after med start date
+#   med_hosp <- med_outpat %>%
+#     left_join(encounters_all) %>%
+#     filter(hours_admitted >= 24,
+#            str_detect(primary_clinical_dx, "19|covid|coronav|sars")) %>% 
+#     select(pat_mrn_id, admit_date, disch_date)
+# # Join covid hospitalizations to outpatient meds
+#   med_outpat_hosp <- med_outpat %>%
+#     left_join(med_hosp) %>%
+#     distinct()
+# }
+# 
+# med_bam_et <- f1("bamlanivimab-etesevimab")
+# med_bebtelovimab <- f1("bebtelovimab")
+# med_cas_imd <- f1("casirivimab-imdevimab")
+# med_molnupiravir <- f1("molnupiravir")
+# med_paxlovid <- f1("paxlovid")
+# med_sotrovimab <-f1("sotrovimab")
+# med_remdesivir <- med_outpat_hosp %>%
+#   filter(pat_mrn_id != "100075799740",
+#          (admit_date - med_start  > 0) & (admit_date - med_start <= 14)  | is.na(admit_date))
+# meds_outpat_all <- med_bam_et %>%
+#   rbind(med_bebtelovimab, med_cas_imd, med_molnupiravir, med_paxlovid, med_remdesivir, med_sotrovimab) %>%
+#   mutate(hosp_covid = ifelse(!is.na(admit_date), TRUE, FALSE)) %>%
+#   left_join(data2 %>% select(pat_mrn_id, dx_date, primary_clinical_dx)) %>%
+#   select(-disch_date) %>%
+#   filter(med_start < admit_date | is.na(admit_date),
+#          dx_date >= as.Date("2021-12-15"),
+#          as.numeric(med_start - dx_date) %in% c(-1:14),
+#          admit_date > med_start | is.na(admit_date))
+# n_distinct(meds_outpat_all$pat_mrn_id)
+# meds_outpat_all %>%
+#   tabyl(medication, hosp_covid) %>%
+#   adorn_totals(c("col", "row")) %>%
+#   adorn_percentages("row") %>%
+#   adorn_pct_formatting() %>%
+#   adorn_ns() %>%
+#   adorn_title()
+# 
+# rm(list = ls(pattern = "med_"))
+# write_rds(meds_outpat_all, "meds_outpat_all.rds")
+```
+
+```{r}
+# Add medication data
+data3 <- data2 %>%
+  select(pat_mrn_id, pat_enc_csn_id, dx_date, covid_hosp, primary_clinical_dx, admit_date, disch_date) %>%
+  full_join(meds_outpat_all %>% select(pat_mrn_id, medication, med_start)) %>%
+  left_join(demo %>% select(pat_mrn_id, birth_date, gender, race, ethnicity, address_line_1, city, state, zip)) %>%
+  rename(outpatient_med = medication) %>%
+  mutate(outpatient_med = ifelse(is.na(outpatient_med), "none", outpatient_med)) %>%
+  distinct()
+```
+
+```{r}
+# Add vaccination data
+data4 <- data3 %>%
+  left_join(vax_brkthr %>% select(pat_mrn_id, dose_num, days_vax_to_test)) %>%
+  mutate(vax_doses = ifelse(is.na(dose_num), 0, dose_num),
+         dose_num = ifelse(is.na(dose_num), 0, dose_num)) %>%
+  select(-c(pat_enc_csn_id, dose_num)) %>%
+  distinct()
+
+data4 %>%
+  select(pat_mrn_id, outpatient_med, covid_hosp) %>%
+  distinct() %>%
+  tabyl(outpatient_med, covid_hosp) %>%
+  adorn_totals(c("col", "row")) %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting() %>%
+  adorn_ns() %>%
+  adorn_title()
+```
+
+#### Comorbidities
+
+```{r}
+problems <- read_rds("problems.rds")
+# problems <- problem_list %>%
+#   clean_names() %>%
+#   mutate_all(tolower) %>%
+#   mutate(date_of_entry = as.Date(date_of_entry),
+#          onset_date = as.Date(onset_date)) %>%
+#   filter(condition_code_type == "icd10")
+# write_rds(problems, "problems.rds")
+```
+
+```{r}
+# Identify comorbidities
+comorb2 <- read_rds("comorb2.rds")
+# conditions_ccs <- read_csv("conditions_ccs.csv")
+# comorb <- problems %>%
+#   select(pat_mrn_id, date_of_entry, onset_date, condition_code) %>%
+#   inner_join(data4 %>% select(pat_mrn_id, dx_date)) %>%
+#   left_join(conditions_ccs) %>% # Join Clinical Classification Software file
+#   filter(!is.na(dx_name), # Remove records with no diagnosis name
+#          date_of_entry < dx_date - 14) %>% # Restrict to diagnoses made at least 14 days before positive covid test
+#   mutate(cat_descr = str_replace_all(cat_descr, pattern = ", initial encounter|, subsequent encounter| - .*|other specified and unspecified |other and ill-defined |other specified ", replacement = ""),
+#          cat_descr = str_replace(cat_descr, pattern = "(burn).*", replacement = "burn")) %>%
+#   filter(!str_detect(cat_descr, pattern = "covid|external cause|without diagnosis|screening|labor|trimester|pregnancy|birth|delivery|gestation|maternal|c-section|maltreatment|benign|carrier|cataract|dislocations|management|sequela|encounter|counsel|fracture|scoliosis|fertility|newborn|neonatal|perinatal|juvenile|fetal|amniotic|prolapse|perineum|injury|liveborn|abortion|pain|immunization|skin|general|history|wound|headache|hearing|postprocedural|refractive|retinal|cornea|glaucoma|strabismus|eye|vision|ophth|sleep|sprain|syncope|underdosing|status|menstrual|menopausal|exam|dermatitis|dysfunc|fever|acquired|allergic|foreign|biomechanical|cleft|injur|nausea|malaise|symptom|shock|amputation|complication|hernia|jaw|hematuria|proteinuria|poisoning|toxic|adverse|chromosom|treat|fluid|gangrene|hemorrhoid|remission|nonmalignant|plastics|uveitis|varicose|incontinence")) %>%
+#   unique()
+# # Recode diabetes
+# comorb2 <- comorb %>%
+#   mutate(cat_descr2 = case_when(str_detect(dx_name, pattern = "diabetes mellitus") & !str_detect(dx_name, pattern = "diabetes mellitus without complications") ~ "diabetes mellitus with complications",
+#                                str_detect(dx_name, pattern = "diabetes mellitus without complications") ~ "diabetes mellitus",
+#                                TRUE ~ cat_descr))
+# 
+# comorb_list <- comorb2 %>%
+#   group_by(cat_descr2) %>%
+#   summarise(n = n()) %>%
+#   ungroup()
+# # 213 conditions
+# glimpse(comorb2)
+# write_rds(comorb2, "comorb2.rds")
+```
+
+#### **Deaths**
+
+```{r}
+deaths_new <- read_rds("deaths_new.rds")
+# deaths_nc <- deaths %>%
+#   select(pat_mrn_id, nc_record_dod) %>%
+#   mutate(pat_mrn_id = as.character(pat_mrn_id),
+#          nc_record_dod = as.Date(nc_record_dod)) %>%
+#   filter(!is.na(nc_record_dod))
+# 
+# demo_deaths <- demo %>%
+#   select(pat_mrn_id, death_date, patient_status) %>%
+#   filter(patient_status ==  "deceased" | !is.na(death_date))
+# 
+# deaths_new <- data4 %>%
+#   select(pat_mrn_id, dx_date) %>%
+#   left_join(deaths_nc) %>%
+#   left_join(demo_deaths) %>%
+#   filter(!is.na(death_date) | !is.na(nc_record_dod)) %>%
+#   distinct() %>%
+#   mutate(death_date2 = as.Date(ifelse(is.na(nc_record_dod), death_date, nc_record_dod)),
+#          days_test_to_death = death_date2 - dx_date) %>%
+#   filter(days_test_to_death %in% c(0:90))
+# 4,074 patients died within 90 days of positive test
+# write_rds(deaths_new, "deaths_new.rds")
+```
+
+#### **Join comorbidities**
+
+```{r}
+data5 <- data4 %>%
+  left_join(comorb2 %>% select(pat_mrn_id, cat_descr, cat_descr2, dx_code)) %>%
+  left_join(deaths_new %>% select(pat_mrn_id, death_date2, days_test_to_death) %>% mutate(death = TRUE)) %>%
+  mutate(death = ifelse(is.na(death), FALSE, death),
+         age_at_dx = floor(as.numeric((dx_date - birth_date) / 365.25))) %>%
+  filter(age_at_dx >= 18) %>%
+  select(pat_mrn_id, age_at_dx, gender, race, ethnicity, address_line_1, city, state, zip, dx_date, days_vax_to_test, vax_doses, covid_hosp, primary_clinical_dx, admit_date, disch_date, outpatient_med, med_start, cat_descr, cat_descr2, dx_code, death, death_date2) %>%
+  unique()
+
+data6 <- data5 %>%
+  filter(dx_date >= as.Date("2022-01-03") & dx_date <= as.Date("2022-08-15")) %>%
+  select(pat_mrn_id, dx_date, med_start, admit_date, outpatient_med, covid_hosp) %>%
+  distinct()
+
+data6 %>%
+  filter(med_start >= dx_date - 1 | is.na(med_start)) %>% 
+  tabyl(outpatient_med, covid_hosp) %>% 
+  adorn_totals() %>%
+  adorn_percentages() %>%
+  adorn_pct_formatting() %>%
+  adorn_ns()
+
+n_distinct(data6$pat_mrn_id)
+# 45,977 patients
+```
+
+# **Antibiotics**
+
+```{r}
+abx <- IRB_20_1095_NAPRAVNIK_MEDICATIONS |>
+  clean_names() |>
+  mutate_all(tolower)
+
+abx1 <- abx |>
+  filter(thera_class == "antibiotics" | thera_class == "antiinfectives/miscellaneous" & str_detect(pharm_class, "anaerobic"))
+
+abx2 <- abx1 |>
+  filter(!str_detect(pharm_class, "ear|eye|nose|ophth|vaginal|topical|otic preparations"))
+
+abx3 <- abx2 |>
+  inner_join(tests_all3 |> select(pat_mrn_id) |> distinct())
+
+abx3 |>
+  tabyl(pharm_class)
+```
+
+```{r}
+antibiotics <- fread("antibiotics.csv")
+covid_hospitalizations <- fread("D:/project/Heather/Rproj_covid_hosp/covid_hospitalizations.csv")
+
+hosp <- covid_hospitalizations |>
+  select(pat_mrn_id, admit_date, disch_date) |>
+  distinct() |>
+  inner_join(antibiotics |> select(pat_mrn_id, start_date, med_type, pharm_class), relationship = "many-to-many") |>
+  filter(med_type == "inpatient medication")
+
+hosp_med <- hosp |>
+  select(-med_type) |>
+  distinct() |>
+  mutate(pat_mrn_id = as.character(pat_mrn_id)) |>
+  filter(start_date >= admit_date,
+         start_date <= admit_date + 3,
+         start_date <= disch_date)
+```
+
+# **Cultures**
+
+```{r}
+cols <- as.vector(names(fread("D:/tracs_mirror_TRUE/RDC_LAB_PATIENT_ONLY_COHORT/IRB_20_1095_ALL_ENCOUNTER_LABS.csv", nrows = 0)))
+colnames(labs) <- cols
+
+labs1 <- labs |>
+  clean_names() |>
+  select(pat_mrn_id, specimen_taken_time, specimen_type, ordered_test_description, ord_value) |>
+  mutate_all(tolower) |>
+  filter(str_detect(ordered_test_description, pattern = c("blood|lower resp")))
+
+labs2 <- labs1 |>
+  filter(!str_detect(ord_value, "no growth|not detected|no organisms|epithelial|no |blood cells|pmns|polymorph|wbc|acceptable|not processed|smear|mixed flora|negative|comment|flora|in progress|not applicable|not reported|test not done|edited|yeast|candida|aspergillus|fungus|mould|contaminants|detected|follow"))
+
+labs2$ord_value <- trimws(gsub("[^[:alpha:][:space:]]", '', labs2$ord_value))
+```
+
+```{r}
+labs3 <- labs2 |>
+  inner_join(hosp_med, relationship = "many-to-many") |>
+  mutate(specimen_taken_time = as.Date(specimen_taken_time)) |>
+  filter(specimen_taken_time >= admit_date,
+         specimen_taken_time <= disch_date,
+         ord_value != "")
+
+a <- as.data.frame(labs3 |> tabyl(ord_value))
+n_distinct(labs3$pat_mrn_id)
+```
+
+
+
+
+
+
+
