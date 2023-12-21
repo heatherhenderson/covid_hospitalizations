@@ -301,7 +301,8 @@ tbl3 |>
 
 ```{r message=FALSE, warning=FALSE}
 df_reg_pax <- df |>
-  select(pat_mrn_id, full_vax, age_grp2, gender, race_eth2, ses_qrtile, ccs2, paxlovid)
+  select(pat_mrn_id, full_vax, age_grp2, gender, race_eth2, ses_qrtile, ccs2, paxlovid) |>
+  filter(gender != "unknown")
 
 varlist <- c("full_vax", "gender", "age_grp2", "race_eth2", "ses_qrtile", "ccs2")
 
@@ -309,22 +310,16 @@ rr_unadj <- data.frame()
 
 for (i in seq_along(varlist)) # Iterate over cols_covar vector
 {
-  formula <- as.formula(paste("paxlovid ~ ", varlist[i])) # Use paste to create formula for model
-  glmmodel <- glm(formula, df_reg_pax, family = poisson(link = "log")) # Run model
-  est <- as.matrix(coeftest(glmmodel, vcov = sandwich))
-  term <- as.matrix(names(coef(glmmodel)))
-  colnames(term) <- "term"
-  estimate <- as.matrix(round(exp(est[,1]),2)) # Extract estimate from model results
-  colnames(estimate) <- "rr"
-  lower <- as.matrix(round(exp(est[,1] - 1.96 * est[,2]),2)) # Calculate confidence interval
-  colnames(lower) <- "lower"
-  upper <- as.matrix(round(exp(est[,1] + 1.96 * est[,2]),2))
-  colnames(upper) <- "upper"
-  df <- cbind(term, estimate, lower, upper)
-  rr_unadj <- rbind(rr_unadj, df) |>
-    filter(term != "(Intercept)",
-           rr != 0) |>
-    remove_rownames()
+  formula <- as.formula(paste("paxlovid ~ ", varlist[i]))
+  glmmodel <- glm(formula, df_reg_pax, family = poisson(link = "log")) |> tidy() |>
+    filter(term != "(Intercept)")|>
+    mutate(rr = exp(estimate),
+           lower = exp(estimate - 1.96 * std.error),
+           upper = exp(estimate + 1.96 * std.error)) |>
+    select(term, rr, lower, upper) |>
+    mutate_if(is.numeric, round, 2)
+
+  rr_unadj <- rbind(rr_unadj, glmmodel)
 }
 
 rr_unadj |>
@@ -401,9 +396,10 @@ varlist <- c("age_grp2", "race_eth2", "full_vax", "ccs2", "ses_qrtile", "paxlovi
 
 # Unadjusted
 hr_unadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ ", .x)), data = df_hr1) |> tidy()) |> 
-  mutate(rr = round(exp(estimate), 2),
-         lower = round(exp(estimate - 1.96 * std.error), 2),
-         upper = round(exp(estimate + 1.96 * std.error), 2))
+  mutate(rr = exp(estimate),
+         lower = exp(estimate - 1.96 * std.error),
+         upper = exp(estimate + 1.96 * std.error)) |>
+  mutate_if(is.numeric, round, 2)
 
 hr_unadj |>
   select(-c(estimate, std.error, statistic, p.value)) |>
@@ -414,9 +410,10 @@ hr_unadj |>
 ```{r message=FALSE, warning=FALSE}
 # Age-adjusted 
 hr_ageadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ rcs(age_at_dx,3) + ", .x)), data = df_hr1) |> tidy()) |> 
-  mutate(rr = round(exp(estimate), 2),
-         lower = round(exp(estimate - 1.96 * std.error), 2),
-         upper = round(exp(estimate + 1.96 * std.error), 2))
+  mutate(rr = exp(estimate),
+         lower = exp(estimate - 1.96 * std.error),
+         upper = exp(estimate + 1.96 * std.error)) |>
+  mutate_if(is.numeric, round, 2)
 
 hr_ageadj |>
   filter(!str_detect(term, "age")) |>
@@ -442,21 +439,15 @@ rd_unadj <- data.frame()
 for (i in seq_along(varlist)) # Iterate over cols_covar vector
 {
   formula <- as.formula(paste("covid_hosp ~ ", varlist[i]))
-  lmmodel <- lm(formula, df_reg_rd)
-  est <- as.matrix(coeftest(lmmodel))
-  term <- as.matrix(names(coef(lmmodel)))
-  colnames(term) <- "term"
-  estimate <- as.matrix(round(est[,1],5))
-  colnames(estimate) <- "rd"
-  lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
-  colnames(lower) <- "lower"
-  upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
-  colnames(upper) <- "upper"
-  df <- cbind(term, estimate, lower, upper)
-  rd_unadj <- rbind(rd_unadj, df) |>
+  lmmodel <- lm(formula, df_reg_rd) |> tidy() |>
     filter(term != "(Intercept)",
-           rd != 0) |>
-    remove_rownames()
+           !str_detect(term, "age"))|>
+    mutate(lower = estimate - 1.96 * std.error,
+           upper = estimate + 1.96 * std.error) |>
+    select(term, estimate, lower, upper) |>
+    mutate_if(is.numeric, round, 5)
+
+  rd_unadj <- rbind(rd_unadj, lmmodel)
 }
 
 rd_unadj |>
@@ -470,23 +461,16 @@ rd_ageadj <- data.frame()
 
 for (i in seq_along(varlist)) # Iterate over cols_covar vector
 {
-  formula <- as.formula(paste("covid_hosp ~ rcs(age_at_dx,3) + ", varlist[i]))
-  lmmodel <- lm(formula, df_reg_rd)
-  est <- as.matrix(coeftest(lmmodel))
-  term <- as.matrix(names(coef(lmmodel)))
-  colnames(term) <- "term"
-  estimate <- as.matrix(round(est[,1],5))
-  colnames(estimate) <- "rd"
-  lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
-  colnames(lower) <- "lower"
-  upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
-  colnames(upper) <- "upper"
-  df <- cbind(term, estimate, lower, upper)
-  rd_ageadj <- rbind(rd_ageadj, df) |>
+  formula <- as.formula(paste("covid_hosp ~ rcs(age_at_dx,3) + ", varlist[i])) 
+  lmmodel <- lm(formula, df_reg_rd) |> tidy() |>
     filter(term != "(Intercept)",
-           !str_detect(term, "age"),
-           rd != 0) |>
-    remove_rownames()
+           !str_detect(term, "age"))|>
+    mutate(lower = estimate - 1.96 * std.error,
+           upper = estimate + 1.96 * std.error) |>
+    select(term, estimate, lower, upper) |>
+    mutate_if(is.numeric, round, 5)
+
+  rd_ageadj <- rbind(rd_ageadj, lmmodel)
 }
 
 rd_ageadj |>
@@ -496,17 +480,16 @@ rd_ageadj |>
 
 ```{r message=FALSE, warning=FALSE}
 # Fully adjusted
-lmmodel <- lm(covid_hosp ~ paxlovid + full_vax + gender + age_grp2 + race_eth2 + ses_qrtile + ccs2, df_reg_rd)
-est <- as.matrix(coeftest(lmmodel))
-term <- as.matrix(names(coef(lmmodel)))
-colnames(term) <- "term"
-estimate <- as.matrix(round(est[,1],5))
-colnames(estimate) <- "rd"
-lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
-colnames(lower) <- "lower"
-upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
-colnames(upper) <- "upper"
-df <- cbind(term, estimate, lower, upper)
+lmmodel <- lm(covid_hosp ~ paxlovid + full_vax + gender + age_grp2 + race_eth2 + ses_qrtile + ccs2, df_reg_rd) |> tidy() |>
+  filter(term == "paxlovidTRUE")|>
+  mutate(lower = estimate - 1.96 * std.error,
+         upper = estimate + 1.96 * std.error) |>
+  select(term, estimate, lower, upper) |>
+  mutate_if(is.numeric, round, 4)
+
+lmmodel |>
+  kable("html", caption = "Fully adjusted risk difference for hospitalization") |>
+  kable_styling()
 ```
 
 #### **Comorbid conditions**
@@ -538,9 +521,10 @@ varlist <- names(df_hr_comorb[, c(22:24, 26:31, 33, 35:37)])
 
 # Unadjusted
 hr_comorb_unadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ ", .x)), data = df_hr_comorb) |> tidy()) |> 
-  mutate(rr = round(exp(estimate), 2),
-         lower = round(exp(estimate - 1.96 * std.error), 2),
-         upper = round(exp(estimate + 1.96 * std.error), 2))
+  mutate(rr = exp(estimate),
+         lower = exp(estimate - 1.96 * std.error),
+         upper = exp(estimate + 1.96 * std.error)) |>
+  mutate_if(is.numeric, round, 2)
 
 hr_comorb_unadj |>
   select(-c(estimate, std.error, statistic, p.value)) |>
@@ -551,10 +535,11 @@ hr_comorb_unadj |>
 ```{r message=FALSE, warning=FALSE}
 # Age-adjusted 
 hr_comorb_ageadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ rcs(age_at_dx,3) + ", .x)), data = df_hr_comorb) |> tidy()) |> 
-  mutate(rr = round(exp(estimate), 2),
-         lower = round(exp(estimate - 1.96 * std.error), 2),
-         upper = round(exp(estimate + 1.96 * std.error), 2)) |>
-  filter(!str_detect(term, "age"))
+  mutate(rr = exp(estimate),
+         lower = exp(estimate - 1.96 * std.error),
+         upper = exp(estimate + 1.96 * std.error)) |>
+  filter(!str_detect(term, "age")) |>
+  mutate_if(is.numeric, round, 2)
 
 hr_comorb_ageadj |>
   select(-c(estimate, std.error, statistic, p.value)) |>
@@ -587,9 +572,10 @@ hr_comorb_ageadj |>
 full_fg_mod <- crr(Surv(ftime, fstatus) ~ paxlovid + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3) + ccs2, data = df_hr1)
 
 full_fg_mod$tidy[1,] |> 
-  mutate(rr = round(exp(estimate), 2),
-         lower = round(exp(estimate - 1.96 * std.error), 2),
-         upper = round(exp(estimate + 1.96 * std.error), 2)) |>
+  mutate(rr = exp(estimate),
+         lower = exp(estimate - 1.96 * std.error),
+         upper = exp(estimate + 1.96 * std.error)) |>
+  mutate_if(is.numeric, round, 2) |>
   select(1, 8:10) |>
   kable("html", caption = "Fully-adjusted hazard ratio") |>
   kable_styling()
