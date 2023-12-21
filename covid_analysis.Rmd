@@ -1,0 +1,874 @@
+---
+title: "COVID-19 and Paxlovid treatment"
+author: "Henderson, Heather"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+setwd("D:/project/Heather/covid_analysis_Rproj")
+
+packages <- function(x){
+  for(i in x){
+     if(!require(i, character.only = TRUE)){
+      install.packages(i, dependencies = TRUE)
+       library(i, character.only = TRUE)
+    }
+  }
+}
+packages(c("readxl", "readr", "tidyverse" , "data.table" , "naniar", "rockchalk", "lubridate", "kableExtra", "survival", "formatR", "condSURV", "janitor", "sjlabelled", "Hmisc", "rms", "aod", "survminer", "glmnet", "tableone", "broom", "cmprsk", "comorbidity", "tidycmprsk", "tidymodels", "ggsurvfit", "investr", "lmtest", "sandwich"))
+```
+
+# **Data**
+
+```{r message=FALSE, warning=FALSE}
+full_data_long <- read_rds("full_data_long_0923.rds")
+covid_comorb <- read_excel("comorb_crosswalk.xlsx")
+zip_ses <- read_excel("zip_ses.xlsx")
+```
+
+```{r message=FALSE, warning=FALSE}
+zip_ses <- zip_ses |> 
+  mutate(zip_code = as.character(zip_code))
+```
+
+```{r message=FALSE, warning=FALSE}
+full <- full_data_long
+
+tests_to_keep <- full |>
+  select(pat_mrn_id, dx_date, admit_date) |>
+  distinct() |>
+  filter(dx_date >= as.Date("2022-01-03"),
+         dx_date <= as.Date("2022-08-15")) |>
+  group_by(pat_mrn_id) |>
+  slice(which.min(dx_date)) |>
+  filter(admit_date == min(admit_date) | is.na(admit_date)) |>
+  ungroup() |>
+  filter(admit_date > dx_date | is.na(admit_date))
+```
+
+#### **Create variables**
+
+```{r message=FALSE, warning=FALSE}
+full1 <- full |>
+  inner_join(tests_to_keep) |>
+  mutate(pat_mrn_id = as.character(pat_mrn_id),
+         gender = ifelse(gender == "", "unknown", gender),
+         age_grp = case_when(age_at_dx < 50 ~ "18-49",
+                             age_at_dx %in% c(50:59) ~ "50-59",
+                             age_at_dx %in% c(60:69) ~ "60-69",
+                             age_at_dx %in% c(70:79) ~ "70-79",
+                             age_at_dx >= 80 ~ "80plus"),
+         age_grp2 = case_when(age_at_dx < 50 ~ "18_49",
+                             age_at_dx %in% c(50:69) ~ "50_69",
+                             age_at_dx >= 70 ~ "70plus"),
+         age_grp2 = factor(age_grp2, labels = c("18-49", "50-69", "\u226570")),
+         full_vax = ifelse(vax_doses >= 2, TRUE, FALSE),
+         vax_doses = factor(vax_doses),
+         race_eth = case_when(ethnicity == "hispanic" ~ "hispanic",
+                              race %in% c("american indian/alaskan native", "na/pi") ~ "na/pi",
+                              race == "black/african american" ~ "black",
+                              race %in% c("asian", "black", "na/pi", "white", "unknown") ~ race,
+                              TRUE ~ "unknown"),
+         race_eth = factor(race_eth, levels = c("white", "black", "asian", "na/pi", "hispanic", "unknown")),
+         race_eth2 = ifelse(race_eth %in% c("asian", "na/pi", "unknown"), "other/unknown", as.character(race_eth)),
+         race_eth2 = factor(race_eth2, levels = c("white", "black", "hispanic", "other/unknown")),
+         hosp_los = as.numeric(disch_date - admit_date),
+         hosp_los = ifelse((is.na(hosp_los) | !covid_hosp), 0, hosp_los),
+         zip = str_sub(zip, 1, 5)) |>
+  rename(death_date = death_date2,
+         zip_code = zip) |>
+  select(-c(race, ethnicity))
+
+n_distinct(full1$pat_mrn_id)
+```
+
+```{r message=FALSE, warning=FALSE}
+comorbs <- covid_comorb |>
+  select(-dx_name)
+full2 <- full1 |>
+  left_join(comorbs, relationship = "many-to-many") |>
+  mutate(condition = ifelse(cat_descr2 == "diabetes mellitus with complications", cat_descr2, condition),
+         last_vax = case_when(days_vax_to_test %in% c(0:90) ~ "<=90 days",
+                              days_vax_to_test %in% c(91:180) ~ "91-180 days",
+                              days_vax_to_test %in% c(181:270) ~ "181-270 days",
+                              days_vax_to_test > 270 ~ ">270 days"),
+         last_vax = factor(last_vax, levels = c("<=90 days", "91-180 days", "181-270 days", ">270 days"))) |>
+  select(pat_mrn_id, gender, age_at_dx, age_grp, age_grp2, race_eth, race_eth2, zip_code, vax_doses, full_vax, days_vax_to_test, last_vax, dx_date, dx_code, condition, outpatient_med, covid_hosp, hosp_los, med_start, admit_date, primary_clinical_dx, death, death_date) |>
+  distinct()
+
+dups <- full2 |>
+  select(-c(dx_code, condition)) |>
+  distinct() |>
+  add_count(pat_mrn_id) |>
+  filter(n > 1)
+
+n_distinct(dups$pat_mrn_id)
+# 128 with >1 med or admission
+```
+
+```{r message=FALSE, warning=FALSE}
+# Classify comorbidities
+full3 <- full2 |>
+  mutate(any_med = ifelse(outpatient_med == "none", FALSE, TRUE)) |>
+  select(-c(primary_clinical_dx)) |>
+  mutate(condition = case_when(condition %in% c("alpha 1 antitrypsin deficiency", "thalassemia", "obesity", "tuberculosis", "hypertension", "anxiety") ~ "none",
+                               condition %in% c("bipolar disorder", "depression", "schizophrenia", "mental health conditions") ~ "mental health conditions",
+                               condition %in% c("chronic obstructive pulmonary disease and bronchiectasis", "interstitial lung disease",
+                                                "pulmonary hypertension and pulmonary embolism") ~ "chronic lung disease",
+                               condition %in% c("diabetes mellitus, type 1", "diabetes mellitus, type 2") ~ "diabetes mellitus without complications",
+                               condition %in% c("hepatitis b", "hepatitis c") ~ "viral hepatitis",
+                               TRUE ~ condition),
+         condition = ifelse(is.na(condition), "none", condition),
+         age_at_dx = ifelse(age_at_dx > 90, 90, age_at_dx)) |>
+  distinct()
+```
+
+```{r message=FALSE, warning=FALSE}
+full4 <- full3 |>
+  select(-outpatient_med) |>
+  distinct() |>
+  group_by(pat_mrn_id, condition) |>
+  summarise() |>
+  ungroup() |>
+  add_count(pat_mrn_id) |>
+  filter(n == 1 | n > 1 & condition != "none") |> # Remove extra rows where condition = "none"
+  select(-n) |>
+  inner_join(full3) |>
+  mutate(days_test_to_admit = as.numeric(admit_date - dx_date),
+         admit_date = as.Date(ifelse(!days_test_to_admit %in% c(1:30), NA, admit_date)), # Remove admissions >30 days from test date
+         covid_hosp = ifelse(is.na(admit_date), FALSE, covid_hosp),
+         death_30days = ifelse(death_date - dx_date > 30 | is.na(death_date), FALSE, TRUE)) |> # Classify deaths <=30 days from test date
+  select(-c(days_test_to_admit, any_med, death)) |>
+  group_by(pat_mrn_id) |>
+  filter(med_start == min(med_start) | is.na(med_start)) |>
+  ungroup()
+
+n_distinct(full4$pat_mrn_id)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Add Charlson comorbidity index variable
+dxcodes <- full4 |>
+  select(pat_mrn_id, dx_code) |>
+  mutate(dx_code = toupper(dx_code)) |>
+  distinct()
+
+ccs <- comorbidity(x = dxcodes, id = "pat_mrn_id", code = "dx_code", map = "charlson_icd10_quan", assign0 = TRUE)
+ccs$ccs_score <- score(ccs, weights = "charlson", assign0 = TRUE)
+ccs2 <- ccs |>
+  mutate(ccs_score = ifelse(ccs_score >=5, 5, ccs_score),
+         ccs2 = case_when(ccs_score == 0 ~ "0",
+                          ccs_score %in% c(1, 2) ~ "1-2",
+                          ccs_score >= 3 ~ ">=3"),
+         ccs2 = factor(ccs2, levels = c("0", "1-2", ">=3")))
+```
+
+```{r message=FALSE, warning=FALSE}
+# Add Charlson score and SES quartile
+full5 <- full4  |>
+  left_join(ccs2 |> select(pat_mrn_id, ccs_score, ccs2)) |>
+  left_join(zip_ses |> select(zip_code, pctile)) |>
+  mutate(pctile = ifelse(is.na(pctile), 0.5, pctile),
+         low_ses = ifelse(pctile > .5, TRUE, FALSE),
+         ses_qrtile = ntile(pctile, 4),
+         ses_qrtile = ifelse(pat_mrn_id %in% c("100036362661", "100046358592"), 3, ses_qrtile),
+         ses_qrtile = ifelse(pat_mrn_id == "100066227917", 1, ses_qrtile),
+         ses_qrtile = factor(ses_qrtile),
+         med_start = as.Date(ifelse(med_start - dx_date > 5 | dx_date - med_start > 1, NA, med_start))) |>
+  select(-c(pctile, race_eth, zip_code, dx_code, ccs_score)) |>
+  distinct()
+```
+
+```{r message=FALSE, warning=FALSE}
+full6 <- full5 |>
+  mutate(tf = pmin(admit_date, death_date, dx_date + 30, na.rm = TRUE), # Set end of follow-up
+         tf = as.Date(ifelse(!outpatient_med %in% c("paxlovid", "none"), med_start, tf)), # Censor when other med received
+         study_wk = floor(as.numeric(dx_date - as.Date("2022-01-03")) / 7) + 1,
+         covid_hosp = ifelse(admit_date > tf | is.na(admit_date), FALSE, TRUE), # Remove admissions after end of follow-up
+         t_treat = as.numeric(med_start - dx_date),
+         t_treat = ifelse(!outpatient_med %in% c("paxlovid", "none"), NA, t_treat), # Set time to treatment to NA if treated with other med
+         paxlovid = ifelse(outpatient_med == "paxlovid", TRUE, FALSE),
+         other_med = ifelse(!outpatient_med %in% c("paxlovid", "none"), TRUE, FALSE)) |>
+  filter(med_start >= dx_date - 1 | is.na(med_start),
+         tf >= dx_date)
+
+n_distinct(full6$pat_mrn_id)
+```
+
+# **Table 1: Study population**
+
+```{r message=FALSE, warning=FALSE}
+df = full6 |> 
+  select(pat_mrn_id, gender, ses_qrtile, vax_doses, full_vax, days_vax_to_test, covid_hosp, race_eth2, age_at_dx, age_grp, age_grp2, hosp_los, paxlovid, t_treat, ccs2, low_ses, death_30days) |> 
+  distinct() |>
+  add_count(pat_mrn_id) |>
+  filter(n == 1 | (n > 1 & paxlovid)) |>
+  select(-n)
+
+vars <- c("age_at_dx", "age_grp", "gender", "race_eth2", "ses_qrtile", "days_vax_to_test", "full_vax", "vax_doses", "ccs2", "covid_hosp", "hosp_los", "t_treat", "death_30days")
+factorVars <- c("age_grp", "gender", "race_eth2", "ses_qrtile", "full_vax", "vax_doses", "ccs2", "covid_hosp", "t_treat", "death_30days")
+
+tableOne <- CreateTableOne(vars = vars, data = df, strata = "covid_hosp",  factorVars = factorVars)
+tbl1 <- as.matrix(print(tableOne, nonnormal = TRUE, quote = FALSE, noSpaces = TRUE, printToggle = FALSE, test = FALSE))
+
+tableOne <- CreateTableOne(vars = vars, data = df, factorVars = factorVars)
+tbl2 <- as.matrix(print(tableOne, nonnormal = TRUE, quote = FALSE, noSpaces = TRUE, printToggle = FALSE, test = FALSE))
+tbl2 |>
+  cbind(tbl1) |>
+  kable("html", caption = "Descriptive statistics by hospitalization status") |>
+  kable_styling()
+```
+
+#### **Comorbid conditions**
+
+```{r message=FALSE, warning=FALSE}
+comorb_analysis <- full6 |>
+  select(pat_mrn_id, age_at_dx, condition, covid_hosp, paxlovid) |>
+  distinct() |>
+  mutate(a = TRUE) |>
+  pivot_wider(names_from = condition, values_from = a, values_fill = FALSE) |>
+  clean_names()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Frequencies
+varlist <- names(comorb_analysis[, c(5, 7:9, 11:16, 18, 20:22)])
+
+comorb_freqs1 <- map_df(varlist, ~(comorb_analysis |> tabyl(all_of(.x)) |> 
+                                     mutate(percent = round(percent * 100, 1))))
+
+comorb_freqs2 <- map_df(varlist, ~(comorb_analysis |> filter(covid_hosp) |> tabyl(all_of(.x)) |> 
+                                     mutate(percent = round(percent * 100, 1))))
+
+comorb_freqs1 |>
+  pivot_longer(cols = c(1, 4:16), names_to = "comorb", values_to = "num") |>
+  filter(num) |>
+  select(comorb, n, percent) |>
+  kable("html", caption = "All patients") |>
+  kable_styling()
+
+comorb_freqs2 |>
+  pivot_longer(cols = c(1, 4:16), names_to = "comorb", values_to = "num") |>
+  filter(num) |>
+  select(comorb, n, percent) |>
+  kable("html", caption = "Hospitalized patients") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Meds breakdown
+full6 |>
+  select(pat_mrn_id, outpatient_med) |>
+  filter(!outpatient_med %in% c("none", "paxlovid")) |>
+  distinct() |>
+  tabyl(outpatient_med) |>
+  adorn_totals() |>
+  adorn_pct_formatting() |>
+  kable("html", caption = "Outpatient medications received") |>
+  kable_styling()
+```
+
+# **Table 2: Demographics by Paxlovid treatment status**
+
+```{r message=FALSE, warning=FALSE}
+df = full6 |> 
+  select(pat_mrn_id, gender, ses_qrtile, vax_doses, full_vax, days_vax_to_test, covid_hosp, race_eth2, age_at_dx, age_grp, age_grp2, hosp_los, paxlovid, t_treat, ccs2, low_ses, death_30days) |> 
+  distinct() |>
+  add_count(pat_mrn_id) |>
+  filter(n == 1 | (n > 1 & paxlovid)) |>
+  select(-n)
+
+vars <- c("age_at_dx", "age_grp2", "gender", "race_eth2", "ses_qrtile", "days_vax_to_test", "full_vax", "vax_doses", "ccs2", "covid_hosp", "hosp_los", "t_treat", "death_30days")
+factorVars <- c("age_grp2", "gender", "race_eth2", "ses_qrtile", "full_vax", "vax_doses", "ccs2", "covid_hosp", "t_treat", "death_30days")
+
+tableOne <- CreateTableOne(vars = vars, data = df, strata = "paxlovid",  factorVars = factorVars)
+tbl3 <- as.matrix(print(tableOne, nonnormal = TRUE, quote = FALSE, noSpaces = TRUE, printToggle = FALSE, test = FALSE))
+
+tbl3 |>
+  kable("html", caption = "Descriptive statistics by Paxlovid treatment status") |>
+  kable_styling()
+```
+
+#### **Risk ratios for Paxlovid treatment**
+
+```{r message=FALSE, warning=FALSE}
+df_reg_pax <- df |>
+  select(pat_mrn_id, full_vax, age_grp2, gender, race_eth2, ses_qrtile, ccs2, paxlovid)
+
+varlist <- c("full_vax", "gender", "age_grp2", "race_eth2", "ses_qrtile", "ccs2")
+
+rr_unadj <- data.frame()
+
+for (i in seq_along(varlist)) # Iterate over cols_covar vector
+{
+  formula <- as.formula(paste("paxlovid ~ ", varlist[i])) # Use paste to create formula for model
+  glmmodel <- glm(formula, df_reg_pax, family = poisson(link = "log")) # Run model
+  est <- as.matrix(coeftest(glmmodel, vcov = sandwich))
+  term <- as.matrix(names(coef(glmmodel)))
+  colnames(term) <- "term"
+  estimate <- as.matrix(round(exp(est[,1]),2)) # Extract estimate from model results
+  colnames(estimate) <- "rr"
+  lower <- as.matrix(round(exp(est[,1] - 1.96 * est[,2]),2)) # Calculate confidence interval
+  colnames(lower) <- "lower"
+  upper <- as.matrix(round(exp(est[,1] + 1.96 * est[,2]),2))
+  colnames(upper) <- "upper"
+  df <- cbind(term, estimate, lower, upper)
+  rr_unadj <- rbind(rr_unadj, df) |>
+    filter(term != "(Intercept)",
+           rr != 0) |>
+    remove_rownames()
+}
+
+rr_unadj |>
+  kable("html", caption = "Risk ratios for Paxlovid treatment") |>
+  kable_styling()
+```
+
+#### **Wide datasets for modeling**
+
+```{r message=FALSE, warning=FALSE}
+# For xgboost model
+df_reg <- full6 |>
+  filter(!other_med,
+         !(death_30days & !covid_hosp))
+
+full_wide_xgb <- df_reg |>
+  select(-c(hosp_los, days_vax_to_test, last_vax, age_grp, age_grp2, outpatient_med, other_med)) |>
+  distinct() |>
+  mutate(a = TRUE, b = TRUE, c = TRUE, d = TRUE, e = TRUE, f = TRUE) |>
+  pivot_wider(names_from = condition, values_from = a, names_prefix = "cond_", values_fill = FALSE) |>
+  pivot_wider(names_from = gender, values_from = b, names_prefix = "gend_", values_fill = FALSE) |>
+  pivot_wider(names_from = race_eth2, values_from = c, names_prefix = "race_eth_", values_fill = FALSE) |>
+  pivot_wider(names_from = vax_doses, values_from = d, names_prefix = "vax_doses_", values_fill = FALSE) |>
+  pivot_wider(names_from = ses_qrtile, values_from = e, names_prefix = "ses_qtl_", values_fill = FALSE) |>
+  pivot_wider(names_from = ccs2, values_from = f, names_prefix = "cci_", values_fill = FALSE) |>
+  clean_names() |>
+  select(-c(gend_female, gend_unknown, cond_none, vax_doses_0, ses_qtl_1, cci_0, race_eth_white, race_eth_other_unknown, cond_alzheimers_dementia, cond_sickle_cell_disease, cond_hiv, cond_cystic_fibrosis, cond_viral_hepatitis, cond_parkinsons, cond_chronic_liver_disease, cond_disabilities, cond_diabetes_mellitus_without_complications))
+
+df_xgboost <- full_wide_xgb |>
+  mutate(hi_cci = ifelse(cci_1_2 | cci_3, TRUE, FALSE)) |>
+  select(-c(pat_mrn_id, dx_date, med_start, admit_date, death_30days, death_date, tf, t_treat, cci_1_2, cci_3))
+
+# write.csv(df_xgboost, "df_xgboost.csv", row.names = FALSE)
+n_distinct(df_reg$pat_mrn_id)
+```
+
+```{r message=FALSE, warning=FALSE}
+# For regression models
+# Hazard ratios
+full_wide_hr <- full6 |>
+  select(-c(age_grp, outpatient_med, admit_date, hosp_los, days_vax_to_test, condition, death_date)) |>
+  distinct() |>
+  add_count(pat_mrn_id) |>
+  filter(n == 1 | n == 2 & paxlovid) |>
+  mutate(a = TRUE) |>
+  pivot_wider(names_from = gender, values_from = a, names_prefix = "gend_", values_fill = FALSE) |>
+  clean_names() |>
+  select(-c(gend_female, gend_unknown, n))
+
+df_hr <- full_wide_hr |>
+  rename(t0 = dx_date) |>
+  mutate(med_start_pax = as.Date(ifelse(paxlovid, med_start, NA)),
+         ftime = tf - t0 + .01, # Follow-up time - add small amount to prevent value of 0
+         t_treat = med_start_pax - t0, # Days to start of treatment
+         outcome = covid_hosp)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Data set for Table 3 and FG model
+df_hr1 <- df_hr |>
+  mutate(death = ifelse(covid_hosp, FALSE, death_30days),
+         fstatus = factor(case_when(death ~ 2,
+                            covid_hosp ~ 1,
+                            TRUE ~ 0), labels = c("Censored", "COVID hospitalization", "Death from any cause")),
+         ftime = as.numeric(ftime))
+
+names(df_hr1)
+```
+
+# **Table 3: Hazard ratios**
+
+```{r message=FALSE, warning=FALSE}
+varlist <- c("age_grp2", "race_eth2", "full_vax", "ccs2", "ses_qrtile", "paxlovid", "gend_male")
+
+# Unadjusted
+hr_unadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ ", .x)), data = df_hr1) |> tidy()) |> 
+  mutate(rr = round(exp(estimate), 2),
+         lower = round(exp(estimate - 1.96 * std.error), 2),
+         upper = round(exp(estimate + 1.96 * std.error), 2))
+
+hr_unadj |>
+  select(-c(estimate, std.error, statistic, p.value)) |>
+  kable("html", caption = "Unadjusted hazard ratios for hospitalization") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Age-adjusted 
+hr_ageadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ rcs(age_at_dx,3) + ", .x)), data = df_hr1) |> tidy()) |> 
+  mutate(rr = round(exp(estimate), 2),
+         lower = round(exp(estimate - 1.96 * std.error), 2),
+         upper = round(exp(estimate + 1.96 * std.error), 2))
+
+hr_ageadj |>
+  filter(!str_detect(term, "age")) |>
+  select(-c(estimate, std.error, statistic, p.value)) |>
+  kable("html", caption = "Age-adjusted hazard ratios for hospitalization") |>
+  kable_styling()
+```
+
+#### **Risk differences**
+
+```{r message=FALSE, warning=FALSE}
+df_reg_rd <- df_reg |>
+  select(-condition) |>
+  distinct()
+
+varlist <- c("paxlovid", "full_vax", "gender", "age_grp2", "race_eth2", "ses_qrtile", "ccs2")
+```
+
+```{r message=FALSE, warning=FALSE}
+# Unadjusted
+rd_unadj <- data.frame()
+
+for (i in seq_along(varlist)) # Iterate over cols_covar vector
+{
+  formula <- as.formula(paste("covid_hosp ~ ", varlist[i]))
+  lmmodel <- lm(formula, df_reg_rd)
+  est <- as.matrix(coeftest(lmmodel))
+  term <- as.matrix(names(coef(lmmodel)))
+  colnames(term) <- "term"
+  estimate <- as.matrix(round(est[,1],5))
+  colnames(estimate) <- "rd"
+  lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
+  colnames(lower) <- "lower"
+  upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
+  colnames(upper) <- "upper"
+  df <- cbind(term, estimate, lower, upper)
+  rd_unadj <- rbind(rd_unadj, df) |>
+    filter(term != "(Intercept)",
+           rd != 0) |>
+    remove_rownames()
+}
+
+rd_unadj |>
+  kable("html", caption = "Unadjusted risk differences for hospitalization") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Age adjusted
+rd_ageadj <- data.frame()
+
+for (i in seq_along(varlist)) # Iterate over cols_covar vector
+{
+  formula <- as.formula(paste("covid_hosp ~ rcs(age_at_dx,3) + ", varlist[i]))
+  lmmodel <- lm(formula, df_reg_rd)
+  est <- as.matrix(coeftest(lmmodel))
+  term <- as.matrix(names(coef(lmmodel)))
+  colnames(term) <- "term"
+  estimate <- as.matrix(round(est[,1],5))
+  colnames(estimate) <- "rd"
+  lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
+  colnames(lower) <- "lower"
+  upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
+  colnames(upper) <- "upper"
+  df <- cbind(term, estimate, lower, upper)
+  rd_ageadj <- rbind(rd_ageadj, df) |>
+    filter(term != "(Intercept)",
+           !str_detect(term, "age"),
+           rd != 0) |>
+    remove_rownames()
+}
+
+rd_ageadj |>
+  kable("html", caption = "Age adjusted risk differences for hospitalization") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Fully adjusted
+lmmodel <- lm(covid_hosp ~ paxlovid + full_vax + gender + age_grp2 + race_eth2 + ses_qrtile + ccs2, df_reg_rd)
+est <- as.matrix(coeftest(lmmodel))
+term <- as.matrix(names(coef(lmmodel)))
+colnames(term) <- "term"
+estimate <- as.matrix(round(est[,1],5))
+colnames(estimate) <- "rd"
+lower <- as.matrix(round(est[,1] - 1.96 * est[,2],5))
+colnames(lower) <- "lower"
+upper <- as.matrix(round(est[,1] + 1.96 * est[,2],5))
+colnames(upper) <- "upper"
+df <- cbind(term, estimate, lower, upper)
+```
+
+#### **Comorbid conditions**
+
+```{r message=FALSE, warning=FALSE}
+df_hr_comorb <- full6 |>
+  select(-c(hosp_los, days_vax_to_test, last_vax, age_grp, age_grp2, outpatient_med, other_med)) |>
+  distinct() |>
+  mutate(a = TRUE) |>
+  pivot_wider(names_from = condition, values_from = a, names_prefix = "cond_", values_fill = FALSE) |>
+  clean_names() |> 
+  add_count(pat_mrn_id) |> 
+  filter(n == 1 | n == 2 & paxlovid) |>
+  rename(t0 = dx_date) |>
+  mutate(med_start_pax = as.Date(ifelse(paxlovid, med_start, NA)),
+         ftime = tf - t0 + .01, # Follow-up time - add small amount to prevent value of 0
+         t_treat = med_start_pax - t0, # Days to start of treatment
+         outcome = covid_hosp) |>
+  mutate(death = ifelse(covid_hosp, FALSE, death_30days),
+         fstatus = factor(case_when(death ~ 2,
+                            covid_hosp ~ 1,
+                            TRUE ~ 0), labels = c("Censored", "COVID hospitalization", "Death from any cause")),
+         ftime = as.numeric(ftime))
+```
+
+```{r message=FALSE, warning=FALSE}
+# Hazard ratios
+varlist <- names(df_hr_comorb[, c(22:24, 26:31, 33, 35:37)])
+
+# Unadjusted
+hr_comorb_unadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ ", .x)), data = df_hr_comorb) |> tidy()) |> 
+  mutate(rr = round(exp(estimate), 2),
+         lower = round(exp(estimate - 1.96 * std.error), 2),
+         upper = round(exp(estimate + 1.96 * std.error), 2))
+
+hr_comorb_unadj |>
+  select(-c(estimate, std.error, statistic, p.value)) |>
+  kable("html", caption = "Unadjusted hazard ratios for hospitalization") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Age-adjusted 
+hr_comorb_ageadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) ~ rcs(age_at_dx,3) + ", .x)), data = df_hr_comorb) |> tidy()) |> 
+  mutate(rr = round(exp(estimate), 2),
+         lower = round(exp(estimate - 1.96 * std.error), 2),
+         upper = round(exp(estimate + 1.96 * std.error), 2)) |>
+  filter(!str_detect(term, "age"))
+
+hr_comorb_ageadj |>
+  select(-c(estimate, std.error, statistic, p.value)) |>
+  kable("html", caption = "Age-adjusted hazard ratios for hospitalization") |>
+  kable_styling()
+```
+
+# **Cox model**
+
+```{r message=FALSE, warning=FALSE}
+# PH model
+# tmerge for time-dependent covariates
+# td_dat <- tmerge(data1 = df_hr |> select(pat_mrn_id, ftime, outcome, gend_male, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses), 
+#     data2 = df_hr |> select(pat_mrn_id, ftime, outcome, gend_male, t_treat, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses), 
+#     id = pat_mrn_id, 
+#     outcome = event(ftime, outcome),
+#     pax_treat = tdc(t_treat))
+# 
+# fit1 <- coxph(Surv(time = tstart, time2 = tstop, event = outcome) ~ pax_treat + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3), data = td_dat)
+# fit1
+
+# z <- cox.zph(fit1)
+# plot(z)
+```
+
+# **Fine-Gray model**
+
+```{r message=FALSE, warning=FALSE}
+# Full model
+full_fg_mod <- crr(Surv(ftime, fstatus) ~ paxlovid + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3) + ccs2, data = df_hr1)
+
+full_fg_mod$tidy[1,] |> 
+  mutate(rr = round(exp(estimate), 2),
+         lower = round(exp(estimate - 1.96 * std.error), 2),
+         upper = round(exp(estimate + 1.96 * std.error), 2)) |>
+  select(1, 8:10) |>
+  kable("html", caption = "Fully-adjusted hazard ratio") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Cumulative incidence plot
+fit2 <- cuminc(Surv(ftime, fstatus) ~ paxlovid, data = df_hr1 |> mutate(ftime = ftime - .01)) # Remove time that was added to prevent 0 values
+
+# Cumulative incidence table
+fit2 |>
+  tbl_cuminc(times = c(7, 14, 21, 28), label_header = "**Day {time}**") |>
+  add_p() |>
+  add_n()
+
+plt <- fit2 |>
+  ggcuminc() +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_x_continuous("Days to hospital admission", breaks = seq(0, 30, 4), limits = c(0, 30)) +
+  scale_y_continuous("Cumulative incidence", breaks = seq(.0025, .01, .0025), limits = c(0, .01)) +
+  scale_color_manual(values = c("midnightblue", "darkgrey")) +
+  scale_fill_manual(values = c("midnightblue", "darkgrey")) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+plt
+# ggsave(filename = "D:/project/Heather/covid_analysis_Rproj/cum_inc_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+# **Plots**
+
+```{r message=FALSE, warning=FALSE}
+df_reg2 <- df_reg |>
+  select(-c(condition, age_grp, vax_doses, last_vax, dx_date, outpatient_med, hosp_los, med_start, admit_date, death_date, death_30days, low_ses)) |>
+  distinct() |>
+  mutate(med_vax_grp = case_when(full_vax & paxlovid ~ 0,
+                             !full_vax & paxlovid ~ 1,
+                             full_vax & !paxlovid ~ 2,
+                             !full_vax & !paxlovid ~ 3),
+         med_vax_grp = factor(med_vax_grp, labels = c("Vaccinated with treatment", "Unvaccinated with treatment", "Vaccinated without treatment", "Unvaccinated without treatment")),
+         med_vax_grp = fct_rev(med_vax_grp))
+
+names(df_reg2)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Dataset for plots
+df_plt <- df_reg2
+df_plt$race_eth2 <- factor(df_plt$race_eth2, levels = c("black", "hispanic", "white", "other/unknown"), labels = c("Black", "Hispanic", "White", "Other/Unknown"))
+```
+
+## **Hospitalization by age and race/ethnicity**
+
+```{r message=FALSE, warning=FALSE}
+mod <- lm(covid_hosp ~ rcs(age_at_dx, 3) * race_eth2, data = df_plt |> filter(race_eth2 != "Other/Unknown"))
+
+plt_race <- as.data.frame(predFit(mod, newdata = df_plt |> filter(race_eth2 != "Other/Unknown"), se.fit = TRUE, interval = "confidence"))
+plt_race <- plt_race |> cbind(df_plt |> filter(race_eth2 != "Other/Unknown"))
+
+plt <- ggplot(data = plt_race) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = race_eth2)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = race_eth2), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkgreen", "darkred"),
+                     name = "") +
+  scale_fill_manual(name = "",
+                      values = c("darkblue", "darkgreen", "darkred")) +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .05, .01), limits = c(0, .05))
+
+plt
+# ggsave(filename = "C:/Users/henderh/Desktop/Projects/covid analysis/Covid_Rproj/plots/race_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+## **Hospitalization by age and vax/treatment**
+
+```{r message=FALSE, warning=FALSE}
+mod <- glm(covid_hosp ~ rcs(age_at_dx, 5) * full_vax + paxlovid, data = df_plt, family = poisson(link = "log"))
+
+a <- as.data.frame(predict(mod, newdata = df_plt, se.fit = TRUE))
+medvax_plt <- a |>
+  cbind(df_plt) |>
+  mutate(fit2 = exp(fit),
+         fit.lwr = exp(fit - 2 * se.fit),
+         fit.upr = exp(fit + 2 * se.fit))
+
+plt <- ggplot(data = medvax_plt) +
+  geom_line(aes(x = age_at_dx, y = fit2, colour = med_vax_grp), linewidth = 1) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = med_vax_grp), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.title = element_blank(),
+  legend.position = c(.25, .85), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_continuous("Age (years)", breaks = seq(20, 80, 10), limits = c(18, 80)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .05, .01), limits = c(0, .05))
+
+plt
+# ggsave(filename = "med_vax_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+## **Hospitalization by age and time since vaccination**
+#### **All patients**
+
+```{r message=FALSE, warning=FALSE}
+df_plt1 <- df_plt |> filter(full_vax)
+mod <- lm(covid_hosp ~ rcs(days_vax_to_test,3) * age_grp2, data = df_plt1)
+
+plt_timevax <- as.data.frame(predFit(mod, newdata = df_plt1, se.fit = TRUE, interval = "confidence"))
+plt_timevax <- plt_timevax |> 
+  cbind(df_plt1) |>
+  mutate(fit.fit = ifelse(fit.fit < 0, 0, fit.fit),
+         fit.lwr = ifelse(fit.lwr < 0, 0, fit.lwr))
+levels(plt_timevax$age_grp2) <- c("18-49 years", "50-69 years", "\u226570 years")
+
+plt <- ggplot(data = plt_timevax) +
+  geom_line(aes(x = days_vax_to_test, y = fit.fit, colour = age_grp2), linewidth = 1) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = days_vax_to_test, fill = age_grp2), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.title = element_blank(),
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_continuous("Time since last vaccine dose (days)", breaks = seq(0, 365, 90), limits = c(0,365)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .05, .01), limits = c(0, .05))
+
+plt
+# ggsave(filename = "time_vax_plota.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+rm(df_plt1, plt_timevax)
+```
+
+#### **Patients who did not receive Paxlovid**
+
+```{r message=FALSE, warning=FALSE}
+df_plt1 <- df_plt |> filter(full_vax,
+                             !paxlovid)
+mod <- lm(covid_hosp ~ rcs(days_vax_to_test,3) * age_grp2, data = df_plt1)
+
+plt_timevax <- as.data.frame(predFit(mod, newdata = df_plt1, se.fit = TRUE, interval = "confidence"))
+plt_timevax <- plt_timevax |> 
+  cbind(df_plt1) |>
+  mutate(fit.fit = ifelse(fit.fit < 0, 0, fit.fit),
+         fit.lwr = ifelse(fit.lwr < 0, 0, fit.lwr))
+levels(plt_timevax$age_grp2) <- c("18-49 years", "50-69 years", "\u226570 years")
+
+plt <- ggplot(data = plt_timevax) +
+  geom_line(aes(x = days_vax_to_test, y = fit.fit, colour = age_grp2), linewidth = 1) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = days_vax_to_test, fill = age_grp2), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.title = element_blank(),
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_continuous("Time since last vaccine dose (days)", breaks = seq(0, 365, 90), limits = c(0,365)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .05, .01), limits = c(0, .05))
+
+plt
+# ggsave(filename = "time_vax_plotb.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+rm(df_plt1, plt_timevax)
+```
+
+## **Hospitalization by week of diagnosis**
+
+```{r message=FALSE, warning=FALSE}
+mod <- lm(covid_hosp ~ rcs(study_wk, 5), data = df_plt)
+
+plt_wk <- as.data.frame(predFit(mod, newdata = df_plt, se.fit = TRUE, interval = "confidence"))
+plt_wk <- plt_wk |> cbind(df_plt)
+
+plt <- ggplot(data = plt_wk) +
+  geom_line(aes(x = study_wk, y = fit.fit)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = study_wk), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_x_continuous("Study week)", breaks = seq(0, 34, 2), limits = c(0, 34)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .01, .0025), limits = c(0, .01))
+
+plt
+```
+
+## **Hospitalization by age and vaccination status**
+
+```{r message=FALSE, warning=FALSE}
+mod <- lm(covid_hosp ~ rcs(age_at_dx, 5) * full_vax, data = df_plt)
+
+plt_vax <- as.data.frame(predFit(mod, newdata = df_plt, se.fit = TRUE, interval = "confidence"))
+plt_vax <- plt_vax |> cbind(df_plt)
+
+plt <- ggplot(data = plt_vax) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = full_vax)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = full_vax), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkred"),
+                    labels = c("Unvaccinated", "Vaccinated"),
+                     name = "") +
+  scale_fill_manual(values = c("darkblue", "darkred"),
+                    labels = c("Unvaccinated", "Vaccinated"),
+                    name = "") +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .025, .005), limits = c(0, .025))
+
+plt
+# ggsave(filename = "C:/Users/henderh/Desktop/Projects/covid analysis/Covid_Rproj/plots/vax_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
+
+## **Hospitalization by age and sex**
+
+```{r message=FALSE, warning=FALSE}
+mod <- lm(covid_hosp ~ rcs(age_at_dx, 5) * gender, data = df_plt)
+
+plt_gend <- as.data.frame(predFit(mod, newdata = df_plt |> filter(gender != "unknown"), se.fit = TRUE, interval = "confidence"))
+plt_gend <- plt_gend |> cbind(df_plt |> filter(gender != "unknown"))
+
+plt <- ggplot(data = plt_gend) +
+  geom_line(aes(x = age_at_dx, y = fit.fit, colour = gender)) +
+  geom_ribbon(aes(ymin = fit.lwr, ymax = fit.upr, x = age_at_dx, fill = gender), alpha = .08) +
+  theme(panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  text = element_text(size = 12), 
+  legend.position = c(.15, .9), 
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  axis.line = element_line(color = "grey")) +
+  scale_color_manual(values = c("darkblue", "darkred"),
+                    labels = c("Female", "Male"),
+                     name = "") +
+  scale_fill_manual(values = c("darkblue", "darkred"),
+                    labels = c("Female", "Male"),
+                    name = "") +
+  scale_x_continuous("Age (years)", breaks = seq(20, 100, 10), limits = c(18, 95)) +
+  scale_y_continuous("Probability of hospital admission", breaks = seq(0, .025, .005), limits = c(0, .025))
+
+plt
+# ggsave(filename = "C:/Users/henderh/Desktop/Projects/covid analysis/Covid_Rproj/plots/gend_plot.tiff", plot = plt, device="tiff", dpi=600, width = 7, height = 5)
+```
