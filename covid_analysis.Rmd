@@ -422,7 +422,7 @@ hr_ageadj |>
   kable_styling()
 ```
 
-#### **Risk differences**
+**Risk differences**
 
 ```{r message=FALSE, warning=FALSE}
 df_reg_rd <- df_reg |>
@@ -436,12 +436,11 @@ varlist <- c("paxlovid", "full_vax", "gender", "age_grp2", "race_eth2", "ses_qrt
 # Unadjusted
 rd_unadj <- data.frame()
 
-for (i in seq_along(varlist)) # Iterate over cols_covar vector
+for (i in seq_along(varlist))
 {
   formula <- as.formula(paste("covid_hosp ~ ", varlist[i]))
   lmmodel <- lm(formula, df_reg_rd) |> tidy() |>
-    filter(term != "(Intercept)",
-           !str_detect(term, "age"))|>
+    filter(term != "(Intercept)")|>
     mutate(lower = estimate - 1.96 * std.error,
            upper = estimate + 1.96 * std.error) |>
     select(term, estimate, lower, upper) |>
@@ -459,7 +458,7 @@ rd_unadj |>
 # Age adjusted
 rd_ageadj <- data.frame()
 
-for (i in seq_along(varlist)) # Iterate over cols_covar vector
+for (i in seq_along(varlist))
 {
   formula <- as.formula(paste("covid_hosp ~ rcs(age_at_dx,3) + ", varlist[i])) 
   lmmodel <- lm(formula, df_reg_rd) |> tidy() |>
@@ -492,7 +491,7 @@ lmmodel |>
   kable_styling()
 ```
 
-#### **Comorbid conditions**
+#### **Hazard ratios: Comorbid conditions**
 
 ```{r message=FALSE, warning=FALSE}
 df_hr_comorb <- full6 |>
@@ -516,7 +515,6 @@ df_hr_comorb <- full6 |>
 ```
 
 ```{r message=FALSE, warning=FALSE}
-# Hazard ratios
 varlist <- names(df_hr_comorb[, c(22:24, 26:31, 33, 35:37)])
 
 # Unadjusted
@@ -544,6 +542,53 @@ hr_comorb_ageadj <- map_df(varlist, ~crr(as.formula(paste("Surv(ftime, fstatus) 
 hr_comorb_ageadj |>
   select(-c(estimate, std.error, statistic, p.value)) |>
   kable("html", caption = "Age-adjusted hazard ratios for hospitalization") |>
+  kable_styling()
+```
+
+**Risk differences: Comorbid conditions**
+
+```{r message=FALSE, warning=FALSE}
+# Unadjusted
+rd_unadj <- data.frame()
+
+for (i in seq_along(varlist))
+{
+  formula <- as.formula(paste("covid_hosp ~ ", varlist[i]))
+  lmmodel <- lm(formula, df_hr_comorb) |> tidy() |>
+    filter(term != "(Intercept)")|>
+    mutate(lower = estimate - 1.96 * std.error,
+           upper = estimate + 1.96 * std.error) |>
+    select(term, estimate, lower, upper) |>
+    mutate_if(is.numeric, round, 5)
+
+  rd_unadj <- rbind(rd_unadj, lmmodel)
+}
+
+rd_unadj |>
+  kable("html", caption = "Unadjusted risk differences for hospitalization") |>
+  kable_styling()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Age adjusted
+rd_ageadj <- data.frame()
+
+for (i in seq_along(varlist))
+{
+  formula <- as.formula(paste("covid_hosp ~ rcs(age_at_dx,3) + ", varlist[i])) 
+  lmmodel <- lm(formula, df_hr_comorb) |> tidy() |>
+    filter(term != "(Intercept)",
+           !str_detect(term, "age"))|>
+    mutate(lower = estimate - 1.96 * std.error,
+           upper = estimate + 1.96 * std.error) |>
+    select(term, estimate, lower, upper) |>
+    mutate_if(is.numeric, round, 5)
+
+  rd_ageadj <- rbind(rd_ageadj, lmmodel)
+}
+
+rd_ageadj |>
+  kable("html", caption = "Age adjusted risk differences for hospitalization") |>
   kable_styling()
 ```
 
