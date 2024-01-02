@@ -32,11 +32,20 @@ packages(c("readxl", "readr", "tidyverse" , "data.table" , "naniar", "rockchalk"
 full_data_long <- read_rds("full_data_long_0923.rds")
 covid_comorb <- read_excel("comorb_crosswalk.xlsx")
 zip_ses <- read_excel("zip_ses.xlsx")
+hosp_all <- read_rds("D:/project/Heather/Rproj_covid_hosp/covid_hospitalizations_with_vax.rds")
 ```
 
 ```{r message=FALSE, warning=FALSE}
 zip_ses <- zip_ses |> 
   mutate(zip_code = as.character(zip_code))
+
+hosp <- hosp_all |>
+  filter(test_date >= as.Date("2022-01-03"),
+         test_date <= as.Date("2022-08-15"),
+         test_date < admit_date) |>
+  select(pat_mrn_id, test_date, admit_date, primary_clinical_dx) |>
+  rename(dx_date = test_date,
+         admit_date2 = admit_date)
 ```
 
 ```{r message=FALSE, warning=FALSE}
@@ -184,7 +193,12 @@ full5 <- full4  |>
          ses_qrtile = factor(ses_qrtile),
          med_start = as.Date(ifelse(med_start - dx_date > 5 | dx_date - med_start > 1, NA, med_start))) |>
   select(-c(pctile, race_eth, zip_code, dx_code, ccs_score)) |>
-  distinct()
+  distinct() |>
+  # Sensitivity analysis to assess less strict definition of hospitalization
+  left_join(hosp |> mutate(covid_hosp2 = TRUE), relationship = "many-to-many") |> 
+  mutate(covid_hosp2 = ifelse(is.na(covid_hosp2), FALSE, covid_hosp2), 
+         admit_date = admit_date2,
+         covid_hosp = ifelse(covid_hosp | covid_hosp2, TRUE, FALSE))
 ```
 
 ```{r message=FALSE, warning=FALSE}
@@ -512,6 +526,8 @@ df_hr_comorb <- full6 |>
                             covid_hosp ~ 1,
                             TRUE ~ 0), labels = c("Censored", "COVID hospitalization", "Death from any cause")),
          ftime = as.numeric(ftime))
+
+df_hr |> tabyl(covid_hosp)
 ```
 
 ```{r message=FALSE, warning=FALSE}
@@ -597,13 +613,13 @@ rd_ageadj |>
 ```{r message=FALSE, warning=FALSE}
 # PH model
 # tmerge for time-dependent covariates
-td_dat <- tmerge(data1 = df_hr |> select(pat_mrn_id, ftime, outcome, gend_male, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
+df_time_dep <- tmerge(data1 = df_hr |> select(pat_mrn_id, ftime, outcome, gend_male, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
     data2 = df_hr |> select(pat_mrn_id, ftime, outcome, gend_male, t_treat, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
     id = pat_mrn_id,
     outcome = event(ftime, outcome),
     pax_treat = tdc(t_treat))
 
-fit1 <- coxph(Surv(time = tstart, time2 = tstop, event = outcome) ~ pax_treat + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3), data = td_dat)
+fit1 <- coxph(Surv(time = tstart, time2 = tstop, event = outcome) ~ pax_treat + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3), data = df_time_dep)
 fit1
 
 # z <- cox.zph(fit1)
@@ -614,14 +630,14 @@ fit1
 
 ```{r message=FALSE, warning=FALSE}
 # Full model
-td_dat <- tmerge(data1 = df_hr1 |> select(pat_mrn_id, ftime, fstatus, gend_male, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
+df_time_dep <- tmerge(data1 = df_hr1 |> select(pat_mrn_id, ftime, fstatus, gend_male, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
     data2 = df_hr1 |> select(pat_mrn_id, ftime, fstatus, gend_male, t_treat, age_at_dx, age_grp2, vax_doses, full_vax, race_eth2, study_wk, ccs2, ses_qrtile, low_ses),
     id = pat_mrn_id,
     outcome = event(ftime, fstatus),
     pax_treat = tdc(t_treat)) |>
   mutate(ftime = tstop)
 
-full_fg_mod <- crr(Surv(ftime, fstatus) ~ strata(pax_treat) + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3) + ccs2, data = td_dat)
+full_fg_mod <- crr(Surv(ftime, fstatus) ~ strata(pax_treat) + age_grp2 + gend_male + race_eth2 + full_vax + ccs2 + ses_qrtile + rcs(study_wk, 3) + ccs2, data = df_time_dep)
 
 full_fg_mod$tidy[1,] |> 
   mutate(rr = exp(estimate),
