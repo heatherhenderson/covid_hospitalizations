@@ -193,12 +193,12 @@ full5 <- full4  |>
          ses_qrtile = factor(ses_qrtile),
          med_start = as.Date(ifelse(med_start - dx_date > 5 | dx_date - med_start > 1, NA, med_start))) |>
   select(-c(pctile, race_eth, zip_code, dx_code, ccs_score)) |>
-  distinct() |>
-  # Sensitivity analysis to assess less strict definition of hospitalization
-  left_join(hosp |> mutate(covid_hosp2 = TRUE), relationship = "many-to-many") |> 
-  mutate(covid_hosp2 = ifelse(is.na(covid_hosp2), FALSE, covid_hosp2), 
-         admit_date = admit_date2,
-         covid_hosp = ifelse(covid_hosp | covid_hosp2, TRUE, FALSE))
+  distinct()
+  # # To assess less strict definition of hospitalization
+  # left_join(hosp |> mutate(covid_hosp2 = TRUE), relationship = "many-to-many") |> 
+  # mutate(covid_hosp2 = ifelse(is.na(covid_hosp2), FALSE, covid_hosp2), 
+  #        admit_date = admit_date2,
+  #        covid_hosp = ifelse(covid_hosp | covid_hosp2, TRUE, FALSE))
 ```
 
 ```{r message=FALSE, warning=FALSE}
@@ -464,6 +464,7 @@ for (i in seq_along(varlist))
 }
 
 rd_unadj |>
+  mutate_if(is.numeric, ~ . * 1000) |>
   kable("html", caption = "Unadjusted risk differences for hospitalization") |>
   kable_styling()
 ```
@@ -487,6 +488,7 @@ for (i in seq_along(varlist))
 }
 
 rd_ageadj |>
+  mutate_if(is.numeric, ~ . * 1000) |>
   kable("html", caption = "Age adjusted risk differences for hospitalization") |>
   kable_styling()
 ```
@@ -501,6 +503,7 @@ lmmodel <- lm(covid_hosp ~ paxlovid + full_vax + gender + age_grp2 + race_eth2 +
   mutate_if(is.numeric, round, 4)
 
 lmmodel |>
+  mutate_if(is.numeric, ~ . * 1000) |>
   kable("html", caption = "Fully adjusted risk difference for hospitalization") |>
   kable_styling()
 ```
@@ -581,6 +584,7 @@ for (i in seq_along(varlist))
 }
 
 rd_unadj |>
+  mutate_if(is.numeric, ~ . * 1000) |>
   kable("html", caption = "Unadjusted risk differences for hospitalization") |>
   kable_styling()
 ```
@@ -604,6 +608,7 @@ for (i in seq_along(varlist))
 }
 
 rd_ageadj |>
+  mutate_if(is.numeric, ~ . * 1000) |>
   kable("html", caption = "Age adjusted risk differences for hospitalization") |>
   kable_styling()
 ```
